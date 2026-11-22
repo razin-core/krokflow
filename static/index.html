@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <script>
+  try {
+    const s = localStorage.getItem("krok-color-scheme");
+    document.querySelector('meta[name="color-scheme"]').content = (s === "light" || s === "dark") ? s : "dark";
+  } catch {}
+  </script>
+  <title>KrokFlow · Підготовка до КРОК-1 та ЄДКІ</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2338BDF8'/%3E%3Ctext x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-weight='800' font-size='28' fill='%23082F49'%3EKF%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/css/app.css?v=2.2.1">
+</head>
+<body>
+  <a href="#app-main" class="skip-link visually-hidden">Перейти до основного вмісту</a>
+
+  <header class="topbar">
+    <div class="topbar-inner container">
+      <button type="button" id="brand-home-btn" class="brand-btn" aria-label="На головну KrokFlow">
+        <span class="brand-mark" aria-hidden="true">KF</span>
+        <span class="brand-text">
+          <span class="brand-name">KrokFlow</span>
+          <span class="brand-sub">КРОК-1 · ЄДКІ</span>
+        </span>
+      </button>
+
+      <div class="topbar-actions">
+        <button type="button" id="shortcuts-btn" class="icon-btn" aria-label="Клавіатурні скорочення">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="5" width="20" height="14" rx="2"/>
+            <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M8 13h.01M12 13h.01M16 13h.01M7 17h10"/>
+          </svg>
+        </button>
+
+        <button type="button" id="theme-toggle-btn" class="icon-btn theme-toggle" aria-label="Перемкнути тему оформлення">
+          <svg class="icon-sun" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+          </svg>
+          <svg class="icon-moon" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+          </svg>
+          <span class="visually-hidden theme-label-to-light">Увімкнути світлу тему Paper Light</span>
+          <span class="visually-hidden theme-label-to-dark">Увімкнути темну тему Clinical Dark</span>
+        </button>
+
+        <button type="button" id="guest-pill-btn" class="guest-pill">
+          <span class="guest-dot" aria-hidden="true"></span>
+          <span>Увійти · Telegram</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app-main" class="container app-main" tabindex="-1"></main>
+
+  <footer class="site-footer container">
+    <p id="site-footer-text">KrokFlow v2.0 · База КРОК-1 · SM-2 інтервальні повтори та Telegram Sync</p>
+  </footer>
+
+  <div id="live-announcer" aria-live="polite" class="visually-hidden"></div>
+
+  <!-- Exam Navigator Dialog -->
+  <dialog id="exam-nav-dialog" closedby="any" aria-labelledby="exam-nav-title">
+    <div class="dialog-header">
+      <h2 id="exam-nav-title">Навігатор іспиту</h2>
+      <form method="dialog">
+        <button type="submit" value="close" class="icon-btn" aria-label="Закрити навігатор">✕</button>
+      </form>
+    </div>
+    <div id="exam-nav-legend" class="exam-nav-legend">
+      <span class="legend-item"><span class="swatch swatch-empty"></span>Не пройдено</span>
+      <span class="legend-item"><span class="swatch swatch-answered"></span>Відповіли</span>
+      <span class="legend-item"><span class="swatch swatch-flagged"></span>Під прапорцем</span>
+    </div>
+    <div id="exam-nav-grid" class="exam-nav-grid"></div>
+  </dialog>
+
+  <!-- Finish Exam Confirmation Dialog -->
+  <dialog id="exam-confirm-dialog" closedby="any" aria-labelledby="exam-confirm-title">
+    <div class="dialog-header">
+      <h2 id="exam-confirm-title">Завершити симуляцію іспиту?</h2>
+    </div>
+    <p id="exam-confirm-summary" class="dialog-body-text"></p>
+    <form method="dialog" class="dialog-actions">
+      <button type="submit" value="cancel" class="btn btn-secondary" autofocus>Повернутися до іспиту</button>
+      <button type="submit" value="confirm" class="btn btn-primary">Здати та перевірити</button>
+    </form>
+  </dialog>
+
+  <!-- Info / Shortcuts / Phase 2 Notice Dialog -->
+  <dialog id="info-dialog" closedby="any" aria-labelledby="info-dialog-title">
+    <div class="dialog-header">
+      <h2 id="info-dialog-title">Інформація</h2>
+      <form method="dialog">
+        <button type="submit" value="close" class="icon-btn" aria-label="Закрити вікно">✕</button>
+      </form>
+    </div>
+    <div id="info-dialog-body" class="dialog-body-text"></div>
+    <form method="dialog" class="dialog-actions">
+      <button type="submit" value="ok" class="btn btn-primary" autofocus>Зрозуміло</button>
+    </form>
+  </dialog>
+
+  <!-- Telegram Auth Dialog -->
+  <dialog id="auth-dialog" closedby="any" aria-labelledby="auth-dialog-title">
+    <div class="dialog-header">
+      <h2 id="auth-dialog-title">Профіль · Telegram Login</h2>
+      <form method="dialog">
+        <button type="submit" value="close" class="icon-btn" aria-label="Закрити вікно входу">✕</button>
+      </form>
+    </div>
+    <div id="auth-dialog-body" class="dialog-body-text stack-md"></div>
+  </dialog>
+
+  <script type="module" src="/static/js/app.js?v=2.2.1"></script>
+</body>
+</html>
