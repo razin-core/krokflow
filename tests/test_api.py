@@ -132,3 +132,22 @@ def test_exam_simulator_grading_threshold_and_breakdown(client: TestClient):
     assert res["passed"] is True
     assert len(res["breakdown"]) == 2
     assert len(res["weakest_topic_ids"]) >= 1
+
+
+def test_spa_routes_and_seo_endpoints(client: TestClient):
+    for path in ("/", "/module/4", "/topic/1", "/mode/train", "/exam", "/flashcards", "/search?q=тест"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert "<!DOCTYPE html>" in r.text
+
+    r_api_404 = client.get("/api/v1/nonexistent")
+    assert r_api_404.status_code == 404
+
+    r_robots = client.get("/robots.txt")
+    assert r_robots.status_code == 200
+    assert "Sitemap: https://krokflow.pp.ua/sitemap.xml" in r_robots.text
+
+    r_sitemap = client.get("/sitemap.xml")
+    assert r_sitemap.status_code == 200
+    assert "<urlset" in r_sitemap.text
+    assert "https://krokflow.pp.ua/module/4" in r_sitemap.text

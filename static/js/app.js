@@ -1,7 +1,14 @@
 /** Main KrokFlow SPA controller covering all MVP & Phase 2 screens. */
 
-import { api } from "./api.js?v=2.2.1";
-import { appendHighlightedText, clear, el, setupDialogLightDismiss } from "./dom.js?v=2.2.1";
+import { api } from "./api.js?v=2.3.0";
+import {
+  appendHighlightedText,
+  clear,
+  createCloseIconSvg,
+  el,
+  pluralUk,
+  setupDialogLightDismiss,
+} from "./dom.js?v=2.3.0";
 import {
   clearGuestBuffer,
   hasPendingGuestSync,
@@ -9,8 +16,8 @@ import {
   recordGuestAttempt,
   state,
   toggleGuestBookmark,
-} from "./state.js?v=2.2.1";
-import { initThemeToggle } from "./theme.js?v=2.2.1";
+} from "./state.js?v=2.3.0";
+import { initThemeToggle } from "./theme.js?v=2.3.0";
 
 const LETTERS = ["A", "B", "C", "D", "E"];
 const mainEl = document.getElementById("app-main");
@@ -66,6 +73,21 @@ function showShortcutsModal() {
     el("li", { className: "kbd-row" }, [el("span", { text: "Самооцінка флешкартки" }), el("span", {}, [el("kbd", { text: "1" }), " ", el("kbd", { text: "2" }), " ", el("kbd", { text: "3" })])]),
   ]);
   showInfoDialog("Клавіатурні скорочення (ПК)", [list]);
+}
+
+function showDatabaseInfoModal() {
+  const subj = state.subjects[0];
+  const verifiedCnt = state.health?.verified_questions ?? subj?.total_questions ?? 0;
+  const reviewCnt = state.health?.needs_review_questions ?? 0;
+  const paragraphs = [
+    `У тренажері зараз ${verifiedCnt} ${pluralUk(verifiedCnt, ["верифіковане питання", "верифіковані питання", "верифікованих питань"])} з мікробіології, вірусології та імунології для підготовки до КРОК-1 / ЄДКІ.`,
+    reviewCnt > 0
+      ? `Ще ${reviewCnt} ${pluralUk(reviewCnt, ["питання", "питання", "питань"])} без надійно витягнутого ключа відповідей тимчасово приховано з активних тестів і симулятора іспиту, щоб не викривляти статистику.`
+      : "Усі активні тести в базі мають перевірений ключ відповіді.",
+    "Повтори між модульними робочими зошитами та збірником ККР об'єднано в єдині картки, тому одне питання може належати до основного модуля й водночас мати тег перехресного джерела (наприклад, ККР або Вірусологія).",
+    "Миттєвий пошук індексує як умову клінічного кейса, так і всі варіанти відповідей A–E, а в режимах тренування й іспиту варіанти щоразу перемішуються незалежно.",
+  ];
+  showInfoDialog("Про базу тестів KrokFlow", paragraphs);
 }
 
 function isQuestionBookmarked(q) {
@@ -127,7 +149,9 @@ async function syncGuestIfPending() {
   try {
     const res = await api.syncGuestProgress({ attempts, bookmarks });
     clearGuestBuffer();
-    announce(`Перенесено ${res.merged_attempts} відповідей та ${res.merged_bookmarks} закладок`);
+    announce(
+      `Перенесено ${res.merged_attempts} ${pluralUk(res.merged_attempts, ["відповідь", "відповіді", "відповідей"])} та ${res.merged_bookmarks} ${pluralUk(res.merged_bookmarks, ["закладку", "закладки", "закладок"])}`
+    );
   } catch {
     // Keep guest buffer intact for retry if network failed.
   }
@@ -157,7 +181,10 @@ async function handleLogout() {
   state.auth.authenticated = false;
   state.auth.user = null;
   state.stats = null;
-  if (state.screen === "profile") state.screen = "dashboard";
+  if (state.screen === "profile") {
+    state.screen = "dashboard";
+    pushRoute("/", { replace: true });
+  }
   await refreshCatalogAndStats();
   authDialog?.close();
   render();
@@ -205,13 +232,47 @@ function openAuthDialog(contextHint = null) {
     bodyEl.appendChild(
       el("div", {
         className: "badge badge-accent",
-        text: `Буфер браузера: ${attCnt} відповідей і ${buf.bookmarks.length} закладок готові до переносу`,
+        text: `Буфер браузера: ${attCnt} ${pluralUk(attCnt, ["відповідь", "відповіді", "відповідей"])} і ${buf.bookmarks.length} ${pluralUk(buf.bookmarks.length, ["закладка", "закладки", "закладок"])} готові до переносу`,
       })
     );
   }
 
   if (state.auth.enabled && state.auth.botUsername) {
     const slot = el("div", { className: "tg-widget-slot" });
+    const loadingEl = el("div", { className: "tg-loading" }, [
+      el("span", { className: "spinner", "aria-hidden": "true" }),
+      el("span", { text: "Завантаження Telegram…" }),
+    ]);
+    slot.appendChild(loadingEl);
+
+    const removeLoader = () => {
+      if (loadingEl.isConnected) loadingEl.remove();
+    };
+    const fallbackTimer = setTimeout(removeLoader, 6000);
+    const observer = new MutationObserver(() => {
+      const iframe = slot.querySelector("iframe");
+      if (iframe) {
+        observer.disconnect();
+        iframe.addEventListener(
+          "load",
+          () => {
+            clearTimeout(fallbackTimer);
+            removeLoader();
+          },
+          { once: true }
+        );
+      }
+    });
+    observer.observe(slot, { childList: true, subtree: true });
+    authDialog.addEventListener(
+      "close",
+      () => {
+        observer.disconnect();
+        clearTimeout(fallbackTimer);
+      },
+      { once: true }
+    );
+
     const script = document.createElement("script");
     script.async = true;
     script.src = "https://telegram.org/js/telegram-widget.js?22";
@@ -273,12 +334,54 @@ async function handleRequestAiExplanation(q, targetAnswerOrReveal, rerenderFn) {
   }
 }
 
-// ---------- Navigation & Session Launchers ----------
+// ---------- Navigation, History API Routing & Session Launchers ----------
 
-function goDashboard() {
+function pushRoute(path, { replace = false } = {}) {
+  try {
+    const target = path.startsWith("/") ? path : `/${path}`;
+    const current = window.location.pathname + window.location.search;
+    if (current === target) return;
+    if (replace) window.history.replaceState(null, "", target);
+    else window.history.pushState(null, "", target);
+  } catch {
+    // Ignore History API restrictions outside normal browser navigation.
+  }
+}
+
+function buildModeSelectorPath(sel = state.selection) {
+  let base = "/";
+  if (sel.topicId != null) base = `/topic/${sel.topicId}`;
+  else if (sel.moduleNo != null) base = `/module/${sel.moduleNo}`;
+  else if (sel.subjectId != null) base = `/subject/${sel.subjectId}`;
+  const params = new URLSearchParams();
+  if (sel.sourceTag) params.set("source", sel.sourceTag);
+  if (sel.limit && sel.limit !== 20) params.set("limit", String(sel.limit));
+  if (sel.hintsEnabled && state.auth.authenticated) params.set("hints", "1");
+  const qs = params.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
+function buildSessionQuery({ subjectId, moduleNo, topicId, topicIds, sourceTag, limit, hintsEnabled } = {}) {
+  const params = new URLSearchParams();
+  if (subjectId != null) params.set("subject", String(subjectId));
+  if (moduleNo != null) params.set("module", String(moduleNo));
+  if (topicId != null) params.set("topic", String(topicId));
+  if (Array.isArray(topicIds) && topicIds.length) params.set("topics", topicIds.join(","));
+  if (sourceTag) params.set("source", sourceTag);
+  if (limit && limit !== 20) params.set("limit", String(limit));
+  if (hintsEnabled) params.set("hints", "1");
+  return params.toString();
+}
+
+function goDashboard(opts = {}) {
+  const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
   stopExamTimer();
   state.screen = "dashboard";
   setDocumentTitle("Дашборд");
+  if (pushUrl) {
+    const q = state.searchQuery.trim();
+    pushRoute(q ? `/search?q=${encodeURIComponent(q)}` : "/");
+  }
   render();
   if (state.auth.authenticated) {
     refreshCatalogAndStats().then(() => {
@@ -287,10 +390,12 @@ function goDashboard() {
   }
 }
 
-function openProfile() {
+function openProfile(opts = {}) {
+  const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
   stopExamTimer();
   state.screen = "profile";
   setDocumentTitle("Профіль та аналітика");
+  if (pushUrl) pushRoute("/profile");
   render();
   if (state.auth.authenticated) {
     refreshCatalogAndStats().then(() => {
@@ -299,7 +404,8 @@ function openProfile() {
   }
 }
 
-function openModeSelector(scope) {
+function openModeSelector(scope, opts = {}) {
+  const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
   stopExamTimer();
   state.selection = {
     subjectId: scope.subjectId ?? null,
@@ -314,20 +420,24 @@ function openModeSelector(scope) {
   };
   state.screen = "mode";
   setDocumentTitle(state.selection.title);
+  if (pushUrl) pushRoute(buildModeSelectorPath(state.selection));
   render();
 }
 
-async function startTraining({
-  mode = "train",
-  subjectId = state.selection.subjectId,
-  moduleNo = state.selection.moduleNo,
-  topicId = state.selection.topicId,
-  topicIds = state.selection.topicIds,
-  sourceTag = state.selection.sourceTag,
-  limit = state.selection.limit,
-  hintsEnabled = Boolean(state.selection.hintsEnabled && state.auth.authenticated),
-  title = state.selection.title,
-} = {}) {
+async function startTraining(
+  {
+    mode = "train",
+    subjectId = state.selection.subjectId,
+    moduleNo = state.selection.moduleNo,
+    topicId = state.selection.topicId,
+    topicIds = state.selection.topicIds,
+    sourceTag = state.selection.sourceTag,
+    limit = state.selection.limit,
+    hintsEnabled = Boolean(state.selection.hintsEnabled && state.auth.authenticated),
+    title = state.selection.title,
+  } = {},
+  { pushUrl = true } = {}
+) {
   try {
     const resp = await api.startQuizSession({
       mode,
@@ -340,6 +450,7 @@ async function startTraining({
       hints_enabled: Boolean(hintsEnabled || mode === "hints"),
     });
     if (!resp.questions.length) {
+      if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
       const msg =
         mode === "mistakes"
           ? "У вас зараз немає активних помилок або прострочених повторень SM-2!"
@@ -362,9 +473,22 @@ async function startTraining({
     };
     state.screen = "quiz";
     setDocumentTitle(`Тренування · ${title}`);
+    if (pushUrl) {
+      const qs = buildSessionQuery({
+        subjectId,
+        moduleNo,
+        topicId,
+        topicIds,
+        sourceTag,
+        limit,
+        hintsEnabled: Boolean(resp.hints_enabled),
+      });
+      pushRoute(qs ? `/mode/${encodeURIComponent(mode)}?${qs}` : `/mode/${encodeURIComponent(mode)}`);
+    }
     render();
-    announce(`Почато тренування: ${resp.questions.length} питань`);
+    announce(`Почато тренування: ${resp.questions.length} ${pluralUk(resp.questions.length, ["питання", "питання", "питань"])}`);
   } catch (err) {
+    if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
     if (err.message.includes("Telegram") || err.message.includes("Увійдіть")) {
       openAuthDialog(err.message);
       return;
@@ -373,7 +497,8 @@ async function startTraining({
   }
 }
 
-async function startFlashcards() {
+async function startFlashcards(opts = {}) {
+  const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
   try {
     const resp = await api.startQuizSession({
       mode: "flashcards",
@@ -386,6 +511,7 @@ async function startFlashcards() {
       hints_enabled: Boolean(state.selection.hintsEnabled && state.auth.authenticated),
     });
     if (!resp.questions.length) {
+      if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
       showInfoDialog("Порожня вибірка", ["За цими фільтрами не знайдено верифікованих питань."]);
       return;
     }
@@ -402,20 +528,36 @@ async function startFlashcards() {
     };
     state.screen = "flashcards";
     setDocumentTitle(`Флешкартки · ${state.selection.title}`);
+    if (pushUrl) {
+      const qs = buildSessionQuery({
+        subjectId: state.selection.subjectId,
+        moduleNo: state.selection.moduleNo,
+        topicId: state.selection.topicId,
+        topicIds: state.selection.topicIds,
+        sourceTag: state.selection.sourceTag,
+        limit: state.selection.limit,
+        hintsEnabled: Boolean(resp.hints_enabled),
+      });
+      pushRoute(qs ? `/flashcards?${qs}` : "/flashcards");
+    }
     render();
-    announce(`Флешкартки готові: ${resp.questions.length} карток`);
+    announce(`Флешкартки готові: ${resp.questions.length} ${pluralUk(resp.questions.length, ["картка", "картки", "карток"])}`);
   } catch (err) {
+    if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
     showInfoDialog("Помилка запуску", [err.message]);
   }
 }
 
-async function startExamSimulator({
-  subjectId = null,
-  moduleNo = null,
-  sourceTag = null,
-  questionCount = 150,
-  title = "Симулятор іспиту КРОК-1",
-} = {}) {
+async function startExamSimulator(
+  {
+    subjectId = null,
+    moduleNo = null,
+    sourceTag = null,
+    questionCount = 150,
+    title = "Симулятор іспиту КРОК-1",
+  } = {},
+  { pushUrl = true } = {}
+) {
   try {
     const resp = await api.startExam({
       subject_id: subjectId,
@@ -424,6 +566,7 @@ async function startExamSimulator({
       question_count: questionCount,
     });
     if (!resp.questions.length) {
+      if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
       showInfoDialog("Порожня вибірка", ["Недостатньо питань для старту симуляції іспиту."]);
       return;
     }
@@ -447,12 +590,227 @@ async function startExamSimulator({
     };
     state.screen = "exam";
     setDocumentTitle("Іспит КРОК-1");
+    if (pushUrl) {
+      const qs = buildSessionQuery({
+        subjectId,
+        moduleNo,
+        sourceTag,
+        limit: questionCount !== 150 ? questionCount : null,
+      });
+      pushRoute(qs ? `/exam?${qs}` : "/exam");
+    }
     startExamTimer();
     render();
-    announce(`Симулятор іспиту запущено: ${resp.total_questions} питань`);
+    announce(`Симулятор іспиту запущено: ${resp.total_questions} ${pluralUk(resp.total_questions, ["питання", "питання", "питань"])}`);
   } catch (err) {
+    if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
     showInfoDialog("Помилка запуску іспиту", [err.message]);
   }
+}
+
+async function applyRouteFromLocation() {
+  stopExamTimer();
+  const path = window.location.pathname || "/";
+  const params = new URLSearchParams(window.location.search);
+  const subj = state.subjects[0] || null;
+  const sourceTag = params.get("source") || null;
+  const limitParam = Number(params.get("limit") || 0);
+  const limit = limitParam > 0 ? limitParam : 20;
+  const hintsRequested = params.get("hints") === "1";
+
+  const modMatch = path.match(/^\/module\/(\d+)\/?$/);
+  if (modMatch && subj) {
+    const moduleNo = Number(modMatch[1]);
+    const mod = subj.modules.find((m) => m.module_no === moduleNo);
+    if (mod) {
+      openModeSelector(
+        {
+          subjectId: subj.id,
+          subjectTitle: subj.title_uk,
+          moduleNo: mod.module_no,
+          sourceTag,
+          limit,
+          hintsEnabled: hintsRequested,
+          title: mod.title_uk,
+        },
+        { pushUrl: false }
+      );
+      return;
+    }
+  }
+
+  const topicMatch = path.match(/^\/topic\/(\d+)\/?$/);
+  if (topicMatch && subj) {
+    const topicId = Number(topicMatch[1]);
+    for (const mod of subj.modules) {
+      const topic = mod.topics.find((t) => t.id === topicId);
+      if (topic) {
+        openModeSelector(
+          {
+            subjectId: subj.id,
+            subjectTitle: subj.title_uk,
+            moduleNo: mod.module_no,
+            topicId: topic.id,
+            sourceTag,
+            limit,
+            hintsEnabled: hintsRequested,
+            title: topic.title_uk,
+          },
+          { pushUrl: false }
+        );
+        return;
+      }
+    }
+  }
+
+  const subjMatch = path.match(/^\/subject\/(\d+)\/?$/);
+  if (subjMatch) {
+    const sid = Number(subjMatch[1]);
+    const targetSubj = state.subjects.find((s) => s.id === sid) || subj;
+    if (targetSubj) {
+      openModeSelector(
+        {
+          subjectId: targetSubj.id,
+          subjectTitle: targetSubj.title_uk,
+          sourceTag,
+          limit,
+          hintsEnabled: hintsRequested,
+          title: sourceTag === "ККР" ? `ККР · ${targetSubj.title_uk}` : targetSubj.title_uk,
+        },
+        { pushUrl: false }
+      );
+      return;
+    }
+  }
+
+  const modeMatch = path.match(/^\/mode\/([a-z0-9_-]+)\/?$/i);
+  if (modeMatch) {
+    const mode = modeMatch[1];
+    const subjectId = params.has("subject") ? Number(params.get("subject")) : subj?.id ?? null;
+    const moduleNo = params.has("module") ? Number(params.get("module")) : null;
+    const topicId = params.has("topic") ? Number(params.get("topic")) : null;
+    const topicIdsRaw = params.get("topics");
+    const topicIds = topicIdsRaw ? topicIdsRaw.split(",").map(Number).filter(Boolean) : null;
+    let title = subj?.title_uk ?? "Мікробіологія";
+    if (topicId != null && subj) {
+      for (const m of subj.modules) {
+        const t = m.topics.find((x) => x.id === topicId);
+        if (t) {
+          title = t.title_uk;
+          break;
+        }
+      }
+    } else if (moduleNo != null && subj) {
+      const m = subj.modules.find((x) => x.module_no === moduleNo);
+      if (m) title = m.title_uk;
+    } else if (mode === "smart_mix") {
+      title = "Розумна сесія · Мікс";
+    } else if (mode === "mistakes") {
+      title = "Помилки та повтори SM-2";
+    } else if (mode === "weak_topics") {
+      title = "Закрити 3 найслабші теми";
+    }
+    state.selection = {
+      ...state.selection,
+      subjectId,
+      moduleNo,
+      topicId,
+      topicIds,
+      sourceTag,
+      limit,
+      hintsEnabled: Boolean(hintsRequested && state.auth.authenticated),
+      title,
+    };
+    await startTraining(
+      {
+        mode,
+        subjectId,
+        moduleNo,
+        topicId,
+        topicIds,
+        sourceTag,
+        limit,
+        hintsEnabled: hintsRequested,
+        title,
+      },
+      { pushUrl: false }
+    );
+    return;
+  }
+
+  if (path === "/flashcards") {
+    const subjectId = params.has("subject") ? Number(params.get("subject")) : subj?.id ?? null;
+    const moduleNo = params.has("module") ? Number(params.get("module")) : null;
+    const topicId = params.has("topic") ? Number(params.get("topic")) : null;
+    const topicIdsRaw = params.get("topics");
+    const topicIds = topicIdsRaw ? topicIdsRaw.split(",").map(Number).filter(Boolean) : null;
+    state.selection = {
+      ...state.selection,
+      subjectId,
+      moduleNo,
+      topicId,
+      topicIds,
+      sourceTag,
+      limit,
+      hintsEnabled: Boolean(hintsRequested && state.auth.authenticated),
+    };
+    await startFlashcards({ pushUrl: false });
+    return;
+  }
+
+  if (path === "/exam") {
+    const subjectId = params.has("subject") ? Number(params.get("subject")) : null;
+    const moduleNo = params.has("module") ? Number(params.get("module")) : null;
+    const questionCount = limitParam > 0 ? limitParam : 150;
+    await startExamSimulator(
+      { subjectId, moduleNo, sourceTag, questionCount, title: `Симулятор КРОК-1 (${questionCount})` },
+      { pushUrl: false }
+    );
+    return;
+  }
+
+  if (path === "/profile") {
+    if (state.auth.authenticated) {
+      openProfile({ pushUrl: false });
+      return;
+    }
+    goDashboard({ pushUrl: false });
+    openAuthDialog("Увійдіть через Telegram, щоб відкрити профіль та аналітику.");
+    return;
+  }
+
+  if (path === "/search") {
+    const q = (params.get("q") || "").trim();
+    state.screen = "dashboard";
+    state.searchQuery = q;
+    setDocumentTitle(q ? `Пошук: ${q}` : "Дашборд");
+    if (!q) {
+      state.searchResponse = null;
+      state.searchLoading = false;
+      render();
+      return;
+    }
+    state.searchLoading = true;
+    render();
+    try {
+      const res = await api.searchQuestions({ q, limit: 30 });
+      if (state.searchQuery.trim() === q) {
+        state.searchResponse = res;
+        state.searchLoading = false;
+        renderSearchResultsRegion();
+      }
+    } catch (err) {
+      state.searchLoading = false;
+      state.searchResponse = { query: q, query_terms: [], elapsed_ms: 0, total: 0, items: [], error: err.message };
+      renderSearchResultsRegion();
+    }
+    return;
+  }
+
+  state.searchQuery = "";
+  state.searchResponse = null;
+  state.searchLoading = false;
+  goDashboard({ pushUrl: false });
 }
 
 function startExamTimer() {
@@ -530,6 +888,8 @@ function renderDashboard() {
     className: "visually-hidden",
     text: "Миттєвий пошук по базі тестів КРОК-1",
   });
+  let kbdHint;
+  let clearBtn;
   const searchInput = el("input", {
     id: "search-input",
     type: "search",
@@ -539,48 +899,71 @@ function renderDashboard() {
     autocomplete: "off",
     onInput: (e) => {
       state.searchQuery = e.target.value;
+      const hasInput = Boolean(state.searchQuery.length);
+      if (kbdHint) kbdHint.hidden = hasInput;
+      if (clearBtn) clearBtn.hidden = !hasInput;
       clearTimeout(searchTimer);
       const q = state.searchQuery.trim();
       if (!q) {
         state.searchResponse = null;
         state.searchLoading = false;
+        pushRoute("/", { replace: true });
         renderSearchResultsRegion();
         return;
       }
       state.searchLoading = true;
+      renderSearchResultsRegion();
       searchTimer = setTimeout(async () => {
+        pushRoute(`/search?q=${encodeURIComponent(q)}`, { replace: true });
         try {
           const res = await api.searchQuestions({ q, limit: 30 });
           if (state.searchQuery.trim() === q) {
             state.searchResponse = res;
             state.searchLoading = false;
             renderSearchResultsRegion();
-            announce(`Знайдено ${res.total} питань за ${res.elapsed_ms} мс`);
+            announce(`Знайдено ${res.total} ${pluralUk(res.total, ["питання", "питання", "питань"])} за ${res.elapsed_ms} мс`);
           }
         } catch (err) {
-          state.searchLoading = false;
-          state.searchResponse = { query: q, query_terms: [], elapsed_ms: 0, total: 0, items: [], error: err.message };
-          renderSearchResultsRegion();
+          if (state.searchQuery.trim() === q) {
+            state.searchLoading = false;
+            state.searchResponse = { query: q, query_terms: [], elapsed_ms: 0, total: 0, items: [], error: err.message };
+            renderSearchResultsRegion();
+          }
         }
-      }, 140);
+      }, 160);
     },
   });
 
-  const kbdHint = state.searchQuery ? null : el("span", { className: "search-kbd", text: "⌘K" });
-  const clearBtn = state.searchQuery
-    ? el("button", {
-        type: "button",
-        className: "search-clear-btn",
-        "aria-label": "Очистити пошук",
-        text: "✕",
-        onClick: () => {
-          state.searchQuery = "";
-          state.searchResponse = null;
-          render();
-          document.getElementById("search-input")?.focus();
-        },
-      })
-    : null;
+  const hasInitialQuery = Boolean(state.searchQuery.length);
+  kbdHint = el("span", {
+    id: "search-kbd-hint",
+    className: "search-kbd",
+    text: "⌘K",
+    hidden: hasInitialQuery,
+  });
+  clearBtn = el(
+    "button",
+    {
+      id: "search-clear-btn",
+      type: "button",
+      className: "search-clear-btn",
+      "aria-label": "Очистити пошук",
+      hidden: !hasInitialQuery,
+      onClick: () => {
+        clearTimeout(searchTimer);
+        state.searchQuery = "";
+        state.searchResponse = null;
+        state.searchLoading = false;
+        searchInput.value = "";
+        kbdHint.hidden = false;
+        clearBtn.hidden = true;
+        pushRoute("/", { replace: true });
+        renderSearchResultsRegion();
+        searchInput.focus();
+      },
+    },
+    [createCloseIconSvg()]
+  );
 
   const searchBox = el("div", { className: "search-box" }, [
     el("span", { className: "search-icon", "aria-hidden": "true", text: "🔍" }),
@@ -607,7 +990,6 @@ function renderDashboard() {
       )
     );
     for (const mod of subj.modules) {
-      if (mod.module_no === 4) continue; // KKR shown in dedicated pill below
       const shortLabel = mod.title_uk.replace(/^Модуль\s+\d+\s*·\s*/, "М" + mod.module_no + " · ");
       pills.appendChild(
         el(
@@ -655,7 +1037,6 @@ function renderDashboard() {
 
   // Hero Quick-Start Card
   const verifiedCnt = state.health?.verified_questions ?? subj?.total_questions ?? 0;
-  const reviewCnt = state.health?.needs_review_questions ?? 0;
   const hero = el("section", { className: "card hero-card" }, [
     el("div", { className: "row-between" }, [
       el("div", {}, [
@@ -663,14 +1044,20 @@ function renderDashboard() {
         el("p", {
           className: "muted",
           style: "margin:0",
-          text: "Чиста клінічна база з миттєвим FTS5-пошуком, Fisher-Yates перемішуванням, SM-2 та маркерами КРОК.",
+          text: "Клінічна база тестів для підготовки до КРОК-1: миттєвий пошук по базі, інтервальні повтори SM-2 та підказки маркерів.",
         }),
       ]),
     ]),
     el("div", { className: "stat-badges" }, [
       el("span", { className: "badge badge-accent", text: `✓ ${verifiedCnt} верифіковано` }),
-      el("span", { className: "badge badge-amber", text: `🛡️ Карантин PDF: ${reviewCnt}` }),
-      el("span", { className: "badge", text: "🔀 A–E перемішуються щоразу" }),
+      el("button", {
+        type: "button",
+        id: "hero-db-info-btn",
+        className: "badge badge-btn",
+        text: "ℹ️ Про базу",
+        onClick: showDatabaseInfoModal,
+      }),
+      el("span", { className: "badge", text: "🔀 Варіанти перемішуються щоразу" }),
     ]),
     state.auth.authenticated && state.stats?.summary
       ? el("div", { className: "kpi-grid" }, [
@@ -711,22 +1098,24 @@ function renderDashboard() {
         type: "button",
         id: "hero-mistakes-btn",
         className: "btn btn-secondary",
-        text: state.stats?.summary?.due_count ? `🧠 Помилки / SM-2 (${state.stats.summary.due_count})` : "🧠 Помилки / SM-2",
         onClick: () =>
           state.auth.authenticated
             ? startTraining({ mode: "mistakes", limit: 25, title: "Помилки та повторення SM-2" })
             : openAuthDialog("Персональна черга помилок і повторень SM-2 працює після входу через Telegram."),
-      }),
+      }, state.auth.authenticated
+        ? [state.stats?.summary?.due_count ? `🧠 Помилки / SM-2 (${state.stats.summary.due_count})` : "🧠 Помилки / SM-2"]
+        : ["🔒 Помилки / SM-2", el("span", { className: "btn-lock-tag", text: "Telegram" })]),
       el("button", {
         type: "button",
         id: "hero-weak-btn",
         className: "btn btn-secondary",
-        text: "🔥 Закрити 3 слабкі теми",
         onClick: () =>
           state.auth.authenticated
             ? startTraining({ mode: "weak_topics", limit: 20, title: "Закрити 3 найслабші теми" })
             : openAuthDialog("Відпрацювання 3 найслабших тем за рейтингом SM-2 доступне після входу через Telegram."),
-      }),
+      }, state.auth.authenticated
+        ? ["🔥 Закрити 3 слабкі теми"]
+        : ["🔒 Закрити 3 слабкі теми", el("span", { className: "btn-lock-tag", text: "Telegram" })]),
     ]),
   ]);
   root.appendChild(hero);
@@ -754,7 +1143,7 @@ function renderDashboard() {
           el("p", {
             className: "muted",
             style: "margin:4px 0 0;font-size:13.5px",
-            text: `${subj.total_questions} питань · ${subj.modules.length} модулі · дедуплікація по ККР`,
+            text: `${subj.total_questions} ${pluralUk(subj.total_questions, ["питання", "питання", "питань"])} · ${subj.modules.length} ${pluralUk(subj.modules.length, ["модуль", "модулі", "модулів"])}`,
           }),
           renderProgressPill(subj),
         ]),
@@ -773,7 +1162,7 @@ function renderDashboard() {
       const group = el("div", { className: "module-group" });
       const modMeta = el("div", { className: "question-actions" }, [
         renderProgressPill(mod),
-        el("span", { className: "badge", text: `${mod.question_count} тестів` }),
+        el("span", { className: "badge", text: `${mod.question_count} ${pluralUk(mod.question_count, ["тест", "тести", "тестів"])}` }),
       ]);
       const header = el(
         "button",
@@ -864,7 +1253,7 @@ function renderSearchResultsRegion() {
   if (!q) return;
 
   if (state.searchLoading) {
-    region.appendChild(el("div", { className: "card muted", text: "Пошук у FTS5…" }));
+    region.appendChild(el("div", { className: "card muted", text: "Пошук у базі…" }));
     return;
   }
 
@@ -878,7 +1267,11 @@ function renderSearchResultsRegion() {
 
   region.appendChild(
     el("div", { className: "row-between" }, [
-      el("span", { className: "muted", style: "font-size:13.5px", text: `Результати FTS5 для «${res.query}»: ${res.total}` }),
+      el("span", {
+        className: "muted",
+        style: "font-size:13.5px",
+        text: `Результати для «${res.query}»: ${res.total} ${pluralUk(res.total, ["питання", "питання", "питань"])}`,
+      }),
       el("span", { className: "badge badge-accent", text: `⚡ ${res.elapsed_ms} мс` }),
     ])
   );
@@ -966,8 +1359,11 @@ function renderModeSelector() {
 
   root.appendChild(
     el("div", { className: "row-between" }, [
-      el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← Назад", onClick: goDashboard }),
-      el("span", { className: "badge badge-accent", text: subj ? `${subj.total_questions} тестів у базі` : "" }),
+      el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← Назад", onClick: () => goDashboard() }),
+      el("span", {
+        className: "badge badge-accent",
+        text: subj ? `${subj.total_questions} ${pluralUk(subj.total_questions, ["тест", "тести", "тестів"])} у базі` : "",
+      }),
     ])
   );
 
@@ -981,13 +1377,29 @@ function renderModeSelector() {
   // Filters card
   const filterCard = el("section", { className: "card stack-md" });
   const sourceRow = el("div", { className: "stack-sm" }, [
-    el("span", { style: "font-weight:650;font-size:14px", text: "Фільтр джерела" }),
+    el("span", { style: "font-weight:650;font-size:14px", text: "Фільтр джерела (включає перетини між модулями)" }),
   ]);
   const sourceChips = el("div", { className: "chips-row" });
   const tagChoices = [{ label: "Усі джерела", value: null }];
+  const tagToModuleNo = {
+    "Загальна мікробіологія": 1,
+    "Вірусологія": 2,
+    "Спеціальна бактеріологія": 3,
+    "Тести по мікробі": 5,
+  };
   if (subj?.source_tags?.length) {
     for (const st of subj.source_tags) {
-      const lbl = st.tag === "ККР" ? `🎯 Тільки ККР (${st.count})` : `${st.tag} (${st.count})`;
+      let lbl;
+      if (st.tag === "ККР") {
+        lbl = `🎯 Тільки ККР (${st.count} у базі)`;
+      } else {
+        const mNo = tagToModuleNo[st.tag];
+        const m = mNo ? subj.modules.find((x) => x.module_no === mNo) : null;
+        lbl =
+          m && m.question_count !== st.count
+            ? `${st.tag} (${m.question_count} у М${m.module_no} · ${st.count} всього)`
+            : `${st.tag} (${st.count})`;
+      }
       tagChoices.push({ label: lbl, value: st.tag });
     }
   } else {
@@ -1006,6 +1418,7 @@ function renderModeSelector() {
         text: ch.label,
         onClick: () => {
           sel.sourceTag = ch.value;
+          pushRoute(buildModeSelectorPath(sel), { replace: true });
           render();
         },
       })
@@ -1043,6 +1456,7 @@ function renderModeSelector() {
             if (t) sel.title = t.title_uk;
           }
         }
+        pushRoute(buildModeSelectorPath(sel), { replace: true });
         render();
       },
     });
@@ -1075,9 +1489,10 @@ function renderModeSelector() {
       el("button", {
         type: "button",
         className: `chip ${sel.limit === cnt ? "active" : ""}`,
-        text: cnt === 150 ? "Усі (до 150)" : `${cnt} питань`,
+        text: cnt === 150 ? "Усі (до 150)" : `${cnt} ${pluralUk(cnt, ["питання", "питання", "питань"])}`,
         onClick: () => {
           sel.limit = cnt;
+          pushRoute(buildModeSelectorPath(sel), { replace: true });
           render();
         },
       })
@@ -1109,6 +1524,7 @@ function renderModeSelector() {
               return;
             }
             sel.hintsEnabled = !sel.hintsEnabled;
+            pushRoute(buildModeSelectorPath(sel), { replace: true });
             render();
           },
         }),
@@ -1520,7 +1936,7 @@ function renderQuizSummary() {
       el("p", {
         className: "muted",
         style: "margin:0",
-        text: `Правильно ${correctCnt} із ${total} питань (${qz.title}).`,
+        text: `Правильно ${correctCnt} із ${total} ${pluralUk(total, ["питання", "питань", "питань"])} (${qz.title}).`,
       }),
       el("div", { className: "hero-actions" }, [
         missed.length
@@ -1939,7 +2355,7 @@ function renderExamResults() {
       el("p", {
         className: "muted",
         style: "margin:0",
-        text: `Правильно ${res.correct_count} із ${res.total_questions} питань · Відповідей надано: ${res.answered_count} · Час: ${formatDuration(res.duration_sec)}.`,
+        text: `Правильно ${res.correct_count} із ${res.total_questions} ${pluralUk(res.total_questions, ["питання", "питань", "питань"])} · Надано ${res.answered_count} ${pluralUk(res.answered_count, ["відповідь", "відповіді", "відповідей"])} · Час: ${formatDuration(res.duration_sec)}.`,
       }),
       el("div", { className: "hero-actions" }, [
         res.weakest_topic_ids.length
@@ -2111,7 +2527,7 @@ function renderProfile() {
         el("div", { className: "row-between", style: "padding:8px 0;border-bottom:1px solid var(--border-subtle)" }, [
           el("div", {}, [
             el("div", { style: "font-weight:600;font-size:14.5px", text: wt.title_uk }),
-            el("div", { className: "muted", style: "font-size:12.5px", text: `Модуль ${wt.module_no} · ${wt.wrong_cnt} помилок · точність ${wt.accuracy_pct}%` }),
+            el("div", { className: "muted", style: "font-size:12.5px", text: `Модуль ${wt.module_no} · ${wt.wrong_cnt} ${pluralUk(wt.wrong_cnt, ["помилка", "помилки", "помилок"])} · точність ${wt.accuracy_pct}%` }),
           ]),
           el("button", {
             type: "button",
@@ -2197,11 +2613,19 @@ function render() {
 }
 
 function setupGlobalEvents() {
-  document.getElementById("brand-home-btn")?.addEventListener("click", goDashboard);
+  document.getElementById("brand-home-btn")?.addEventListener("click", () => {
+    state.searchQuery = "";
+    state.searchResponse = null;
+    state.searchLoading = false;
+    goDashboard({ pushUrl: true });
+  });
   document.getElementById("shortcuts-btn")?.addEventListener("click", showShortcutsModal);
   document.getElementById("guest-pill-btn")?.addEventListener("click", () => {
     if (state.auth.authenticated) openProfile();
     else openAuthDialog();
+  });
+  window.addEventListener("popstate", () => {
+    applyRouteFromLocation();
   });
 
   examConfirmDialog?.addEventListener("close", () => {
@@ -2328,7 +2752,7 @@ async function bootstrap() {
       state.selection.subjectTitle = state.subjects[0].title_uk;
       state.selection.title = state.subjects[0].title_uk;
     }
-    render();
+    await applyRouteFromLocation();
   } catch (err) {
     clear(mainEl);
     mainEl.appendChild(el("div", { className: "card", text: `Не вдалося завантажити дані: ${err.message}` }));

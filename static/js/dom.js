@@ -1,4 +1,31 @@
-/** Safe DOM helpers (zero innerHTML on untrusted text) and dialog polyfill fallback. */
+/** Safe DOM helpers (zero innerHTML on untrusted text), Ukrainian pluralization, and dialog fallback. */
+
+export function pluralUk(n, forms) {
+  const abs = Math.abs(Math.trunc(Number(n) || 0));
+  const mod100 = abs % 100;
+  const mod10 = abs % 10;
+  if (mod100 >= 11 && mod100 <= 14) return forms[2];
+  if (mod10 === 1) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4) return forms[1];
+  return forms[2];
+}
+
+export function createCloseIconSvg() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "16");
+  svg.setAttribute("height", "16");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", "M3.5 3.5L12.5 12.5M12.5 3.5L3.5 12.5");
+  svg.appendChild(path);
+  return svg;
+}
 
 export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);

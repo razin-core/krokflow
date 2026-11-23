@@ -20,7 +20,7 @@ def _sign_telegram_payload(
     bot_token: str,
     tg_id: int = 888000111,
     first_name: str = "Євгеній",
-    username: str | None = "demo_admin",
+    username: str | None = "Razin_Sarinum",
     auth_date: int | None = None,
 ) -> dict[str, object]:
     ts = auth_date if auth_date is not None else int(time.time())
@@ -93,7 +93,7 @@ def test_telegram_auth_lifecycle_and_proxy_secure_cookie(client: TestClient, mon
     body = r_https.json()
     assert body["authenticated"] is True
     assert body["user"]["role"] == "admin"
-    assert body["user"]["username"] == "demo_admin"
+    assert body["user"]["username"] == "Razin_Sarinum"
     set_cookie = r_https.headers.get("set-cookie", "").lower()
     assert "httponly" in set_cookie
     assert "secure" in set_cookie

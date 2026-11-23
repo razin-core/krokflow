@@ -206,9 +206,24 @@ class ImportStats:
     sample_questions: list[dict] = field(default_factory=list)
 
 
+_BAD_ENCODING_RE = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\u007f-\u009f\u4e00-\u9fff\u0800-\u083f\u1600-\u1cff\u3100-\u312f]"
+)
+
+
+def sanitize_text_encoding(text: str) -> str:
+    """Strip control/CJK/Symbol-font garbage and normalize escaped % and low quotes."""
+    s = unicodedata.normalize("NFKC", text)
+    s = _BAD_ENCODING_RE.sub(" ", s)
+    s = s.replace("\\%", "%")
+    s = re.sub(r"„([^„”«»]{1,120})[”\"]", r"«\1»", s)
+    s = s.replace("„", "«").replace("”", "»")
+    return s
+
+
 def clean_display_text(text: str) -> str:
     """Clean PDF whitespace artifacts and fix Latin i/I inside Cyrillic words."""
-    s = unicodedata.normalize("NFKC", text)
+    s = sanitize_text_encoding(text)
     s = s.replace("\u00a0", " ").replace("\xad", "")
     for _ in range(3):
         s = _CYR_I_LEFT_RE.sub("і", s)
@@ -1194,11 +1209,14 @@ def parse_catdoc_doc(doc_path: Path, *, default_module_no: int = 5) -> list[Pars
     theme_parts: list[str] = []
 
     def _clean_theme_title(parts: list[str]) -> str:
-        joined = " ".join(parts).strip()
-        # Fallback if catdoc emitted symbol-font glyphs instead of Cyrillic characters.
-        if not re.search(r"[а-яіїєґА-ЯІЇЄҐ]{3,}", joined.split(".", 1)[-1]):
-            return parts[0].rstrip(".")
-        return re.sub(r"\s{2,}", " ", joined)
+        prefix = parts[0].strip()
+        rest = sanitize_text_encoding(" ".join(parts[1:]).strip())
+        # Strip leading symbol-font ASCII/UTF garbage before first genuine Ukrainian title word.
+        m_real = re.search(r"[А-ЯІЇЄҐ][а-яіїєґ]{2,}", rest)
+        if not m_real:
+            return prefix.rstrip(".")
+        cleaned_rest = re.sub(r"\s{2,}", " ", rest[m_real.start() :]).strip()
+        return f"{prefix} {cleaned_rest}".strip()
 
     def _flush() -> None:
         nonlocal cur_stem, cur_opts
@@ -1256,12 +1274,15 @@ def parse_catdoc_doc(doc_path: Path, *, default_module_no: int = 5) -> list[Pars
 
     parsed: list[ParsedQuestion] = []
     for idx_q, (topic_title, stem_raw, opts_raw) in enumerate(raw_items, start=1):
-        stem = re.sub(r"\s+", " ", stem_raw).strip()
+        stem = sanitize_text_encoding(re.sub(r"\s+", " ", stem_raw).strip())
         stem = re.sub(r"^\d{1,3}\s+(?=[А-ЯІЇЄҐA-Z])", "", stem)
         if len(stem) < 12:
             continue
         starred = [i for i, o in enumerate(opts_raw) if "*" in o[:3]]
-        clean_opts = [re.sub(r"\s+", " ", re.sub(r"^\s*\*\s*", "", o).rstrip(";")).strip() for o in opts_raw]
+        clean_opts = [
+            sanitize_text_encoding(re.sub(r"\s+", " ", re.sub(r"^\s*\*\s*", "", o).rstrip(";")).strip())
+            for o in opts_raw
+        ]
         clean_opts = [o for o in clean_opts if o]
 
         has_glued_opt = any("?" in o or len(o) > 220 or re.search(r"\b[A-E]\s*\*", o) for o in clean_opts)

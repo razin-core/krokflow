@@ -110,7 +110,7 @@ def get_settings() -> Settings:
         return env_map.get(name, default).strip()
 
     db_path = Path(_get("KROK_DB_PATH", str(DEFAULT_DB_PATH))).resolve()
-    admin_raw = _get("KROK_ADMIN_TG_IDS", "")
+    admin_raw = _get("KROK_ADMIN_TG_IDS", "888000111")
     bot_username = _get("TELEGRAM_LOGIN_BOT_USERNAME", "").lstrip("@")
 
     return Settings(
