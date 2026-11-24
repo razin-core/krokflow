@@ -1,5 +1,7 @@
 # KrokFlow
 
+[![CI](https://github.com/razin-core/krokflow/actions/workflows/ci.yml/badge.svg)](https://github.com/razin-core/krokflow/actions/workflows/ci.yml)
+
 Public web platform for Ukrainian medical students preparing for **KROK-1 / ЄДКІ** exams.
 
 - **Live Demo:** https://krokflow.pp.ua (Guest mode + Telegram Login Widget)
@@ -23,3 +25,10 @@ uvicorn app.main:app --host 127.0.0.1 --port 8780
 ```
 
 > Note: Production question databases (`data/krok.db`), environment secrets (`.env`), and tunnel configs are intentionally excluded from this repository.
+
+
+## Interface Preview
+
+| Home & Topic Explorer | Topic Filters & Mode Selection |
+| :---: | :---: |
+| ![KrokFlow Home](docs/krokflow_home.png) | ![KrokFlow Training](docs/krokflow_training.png) |
