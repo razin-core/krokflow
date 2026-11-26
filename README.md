@@ -33,6 +33,6 @@ uvicorn app.main:app --host 127.0.0.1 --port 8780
 
 ## Interface Preview
 
-| Home & Topic Explorer | Topic Filters & Mode Selection |
+| Home & Cascade Constructor | Training · Timers, KROK Markers & Anchor |
 | :---: | :---: |
 | ![KrokFlow Home](docs/krokflow_home.png) | ![KrokFlow Training](docs/krokflow_training.png) |
