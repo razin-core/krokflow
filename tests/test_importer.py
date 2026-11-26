@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from app.db import db_session
@@ -128,13 +129,21 @@ def test_validate_quarantines_glued_options_and_stems():
     assert q_stem.review_reason == "glued_stem"
 
 
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def test_real_inbox_parses_without_glued_regression():
-    inbox = Path("/home/ubuntu/taildrop_inbox")
+    env_inbox = os.environ.get("KROK_INBOX_DIR")
+    inbox = Path(env_inbox) if env_inbox else Path.home() / "taildrop_inbox"
     kkr_pdf = inbox / "ККР.pdf"
     vir_pdf = inbox / "База тестових завдань КРОК 1. Вірусологія.pdf"
     doc_file = inbox / "тести по мікробі.doc"
 
-    if kkr_pdf.exists():
+    if _safe_is_file(kkr_pdf):
         kkr_all = parse_dense_kkr_pdf(kkr_pdf)
         kkr_qs = [q for q in kkr_all if q.status == "verified"]
         assert not any(
@@ -143,7 +152,7 @@ def test_real_inbox_parses_without_glued_regression():
         )
         assert any("Назвіть ці тільця" in q.stem for q in kkr_all)
 
-    if vir_pdf.exists():
+    if _safe_is_file(vir_pdf):
         vir_qs = [q for q in parse_module_pdf(vir_pdf, default_module_no=2) if q.status == "verified"]
         assert any("Назвіть ці тільця" in q.stem for q in vir_qs)
         assert any("Ретровірусів" in q.stem and "СНІД" not in q.stem for q in vir_qs)
@@ -151,7 +160,7 @@ def test_real_inbox_parses_without_glued_regression():
         assert any("нагадують колесо" in q.stem and "краснухи" not in q.stem for q in vir_qs)
         assert any("IgM до вірусу краснухи" in q.stem for q in vir_qs)
 
-    if doc_file.exists():
+    if _safe_is_file(doc_file):
         doc_qs = [q for q in parse_catdoc_doc(doc_file) if q.status == "verified"]
         assert len(doc_qs) >= 265
         assert not any("?" in o or len(o) > 220 for q in doc_qs for o in q.options)

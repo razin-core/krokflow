@@ -58,6 +58,10 @@ def test_fixture_db_text_encoding(test_db_path: Path) -> None:
 
 
 def test_production_db_text_encoding() -> None:
-    live_db = Path("/home/ubuntu/krok_trainer/data/krok.db")
-    if live_db.exists():
+    live_db = Path(__file__).resolve().parents[1] / "data" / "krok.db"
+    try:
+        has_live_db = live_db.is_file()
+    except OSError:
+        return
+    if has_live_db:
         _audit_database(live_db)
