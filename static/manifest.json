@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "KrokFlow · Підготовка до КРОК-1 та ЄДКІ",
+  "short_name": "KrokFlow",
+  "description": "Інтерактивний тренажер підготовки до КРОК-1 та ЄДКІ: миттєвий пошук по базі, інтервальні повторення SM-2, клінічні маркери та симулятор іспиту.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0B1120",
+  "theme_color": "#0B1120",
+  "lang": "uk",
+  "icons": [
+    {
+      "src": "/static/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

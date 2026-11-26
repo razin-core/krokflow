@@ -1,6 +1,9 @@
 .cloudflared.env
 .env
+.env.*
+!.env.example
 data/
+backups/
 .venv/
 __pycache__/
 *.pyc
@@ -8,3 +11,6 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+*.bak*
+.token_secret

@@ -15,6 +15,8 @@ from app.schemas import (
     FlashcardRateResponse,
     GuestSyncRequest,
     GuestSyncResponse,
+    ResetStatsRequest,
+    ResetStatsResponse,
     UserStatsOut,
 )
 from app.services.auth_service import CurrentUserDep
@@ -22,6 +24,7 @@ from app.services.sm2_service import (
     get_user_stats,
     merge_guest_progress,
     record_question_progress,
+    reset_user_stats,
     set_bookmark,
 )
 
@@ -49,6 +52,17 @@ def sync_guest_progress(
         bookmarks=payload.bookmarks,
     )
     return GuestSyncResponse(**res)
+
+
+@router.post("/stats/reset", response_model=ResetStatsResponse)
+def reset_my_stats(
+    user: CurrentUserDep,
+    conn: Annotated[sqlite3.Connection, Depends(get_db)],
+    payload: ResetStatsRequest | None = None,
+) -> ResetStatsResponse:
+    keep_bookmarks = True if payload is None else payload.keep_bookmarks
+    res = reset_user_stats(conn, user_id=user.id, keep_bookmarks=keep_bookmarks)
+    return ResetStatsResponse(**res)
 
 
 @router.post("/flashcards/rate", response_model=FlashcardRateResponse)

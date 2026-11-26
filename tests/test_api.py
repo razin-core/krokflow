@@ -135,13 +135,34 @@ def test_exam_simulator_grading_threshold_and_breakdown(client: TestClient):
 
 
 def test_spa_routes_and_seo_endpoints(client: TestClient):
-    for path in ("/", "/module/4", "/topic/1", "/mode/train", "/exam", "/flashcards", "/search?q=тест"):
+    for path in ("/", "/module/4", "/topic/1", "/mode/train", "/exam", "/flashcards", "/search?q=тест", "/bookmarks"):
         r = client.get(path)
         assert r.status_code == 200
         assert "<!DOCTYPE html>" in r.text
 
+    r_bmk_empty = client.get("/api/v1/bookmarks")
+    assert r_bmk_empty.status_code == 200
+    assert r_bmk_empty.json() == {"total": 0, "items": []}
+
+    search_hit = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]
+    r_bmk_guest = client.get(f"/api/v1/bookmarks?ids={search_hit['id']}")
+    assert r_bmk_guest.status_code == 200
+    assert r_bmk_guest.json()["total"] == 1
+    assert r_bmk_guest.json()["items"][0]["id"] == search_hit["id"]
+
+    r_bmk_sess = client.post("/api/v1/quiz/session", json={"mode": "bookmarks", "question_ids": [search_hit["id"]]})
+    assert r_bmk_sess.status_code == 200
+    assert r_bmk_sess.json()["total_questions"] == 1
+
     r_api_404 = client.get("/api/v1/nonexistent")
     assert r_api_404.status_code == 404
+    assert r_api_404.headers["content-type"].startswith("application/json")
+
+    r_html_404 = client.get("/nonexistent-qa-test")
+    assert r_html_404.status_code == 404
+    assert r_html_404.headers["content-type"].startswith("text/html")
+    assert "KrokFlow" in r_html_404.text
+    assert "404" in r_html_404.text
 
     r_robots = client.get("/robots.txt")
     assert r_robots.status_code == 200
@@ -151,3 +172,40 @@ def test_spa_routes_and_seo_endpoints(client: TestClient):
     assert r_sitemap.status_code == 200
     assert "<urlset" in r_sitemap.text
     assert "https://krokflow.pp.ua/module/4" in r_sitemap.text
+
+    r_manifest = client.get("/manifest.json")
+    assert r_manifest.status_code == 200
+    assert "application/manifest+json" in r_manifest.headers["content-type"]
+    manifest_data = r_manifest.json()
+    assert manifest_data["id"] == "/"
+    assert manifest_data["display"] == "standalone"
+    assert any(ic.get("sizes") == "192x192" for ic in manifest_data.get("icons", []))
+
+    for icon_path in ("/static/icons/icon-192.png", "/static/icons/icon-512.png"):
+        r_icon = client.get(icon_path)
+        assert r_icon.status_code == 200
+        assert r_icon.headers["content-type"].startswith("image/png")
+
+
+def test_multi_topic_and_source_tags_filters(client: TestClient):
+    subjects = client.get("/api/v1/subjects").json()["subjects"]
+    topics = subjects[0]["modules"][0]["topics"]
+    topic_ids = [t["id"] for t in topics]
+    assert len(topic_ids) == 2
+
+    # Quiz session accepts multiple topic_ids
+    r_quiz = client.post("/api/v1/quiz/session", json={"mode": "train", "topic_ids": topic_ids, "limit": 20})
+    assert r_quiz.status_code == 200
+    assert r_quiz.json()["total_questions"] == 7
+
+    # Single topic_ids filter restricts properly
+    r_one = client.post("/api/v1/quiz/session", json={"mode": "train", "topic_ids": [topic_ids[0]], "limit": 20})
+    assert r_one.status_code == 200
+    assert r_one.json()["total_questions"] == topics[0]["question_count"]
+    assert all(q["topic_id"] == topic_ids[0] for q in r_one.json()["questions"])
+
+    # Exam simulator also supports topic_ids filtering
+    r_exam = client.post("/api/v1/exam/start", json={"topic_ids": [topic_ids[0]], "question_count": 20})
+    assert r_exam.status_code == 200
+    assert r_exam.json()["total_questions"] == topics[0]["question_count"]
+    assert all(q["topic_id"] == topic_ids[0] for q in r_exam.json()["questions"])

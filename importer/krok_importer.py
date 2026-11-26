@@ -216,8 +216,10 @@ def sanitize_text_encoding(text: str) -> str:
     s = unicodedata.normalize("NFKC", text)
     s = _BAD_ENCODING_RE.sub(" ", s)
     s = s.replace("\\%", "%")
+    s = s.replace("`", "’").replace("\u2212", "-")
     s = re.sub(r"„([^„”«»]{1,120})[”\"]", r"«\1»", s)
     s = s.replace("„", "«").replace("”", "»")
+    s = s.replace("сифиліс", "сифіліс").replace("Сифиліс", "Сифіліс")
     return s
 
 
@@ -1321,7 +1323,7 @@ def import_doc_file(
     doc_path: Path,
     *,
     module_no: int = 5,
-    source_tag: str = "Тести по мікробі",
+    source_tag: str = "Тести з мікробіології",
     subject_slug: str = "microbiology",
     subject_title: str = "Мікробіологія",
     subject_icon: str = "🧬",

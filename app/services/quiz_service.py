@@ -15,8 +15,10 @@ from fastapi import HTTPException, status
 
 from app.config import get_settings
 from app.schemas import (
+    BookmarksListResponse,
     OptionOut,
     QuestionOut,
+    QuestionReportResponse,
     QuizAnswerResponse,
     QuizSessionRequest,
     QuizSessionResponse,
@@ -136,7 +138,9 @@ def _fetch_question_candidates(
     module_no: int | None = None,
     topic_id: int | None = None,
     topic_ids: list[int] | None = None,
+    question_ids: list[int] | None = None,
     source_tag: str | None = None,
+    source_tags: list[str] | None = None,
 ) -> list[sqlite3.Row]:
     clauses = ["q.status = 'verified'"]
     params: list[object] = []
@@ -153,10 +157,33 @@ def _fetch_question_candidates(
     if topic_id is not None:
         clauses.append("q.topic_id = ?")
         params.append(topic_id)
-    if topic_ids:
-        placeholders = ",".join("?" for _ in topic_ids)
-        clauses.append(f"q.topic_id IN ({placeholders})")
-        params.extend(topic_ids)
+
+    clean_topic_ids = [int(tid) for tid in (topic_ids or []) if int(tid) > 0]
+    clean_source_tags = [str(st).strip() for st in (source_tags or []) if str(st).strip()]
+    if clean_topic_ids and clean_source_tags:
+        t_ph = ",".join("?" for _ in clean_topic_ids)
+        s_ph = ",".join("?" for _ in clean_source_tags)
+        clauses.append(
+            f"(q.topic_id IN ({t_ph}) OR EXISTS (SELECT 1 FROM json_each(q.source_tags) WHERE json_each.value IN ({s_ph})))"
+        )
+        params.extend(clean_topic_ids)
+        params.extend(clean_source_tags)
+    elif clean_topic_ids:
+        t_ph = ",".join("?" for _ in clean_topic_ids)
+        clauses.append(f"q.topic_id IN ({t_ph})")
+        params.extend(clean_topic_ids)
+    elif clean_source_tags:
+        s_ph = ",".join("?" for _ in clean_source_tags)
+        clauses.append(f"EXISTS (SELECT 1 FROM json_each(q.source_tags) WHERE json_each.value IN ({s_ph}))")
+        params.extend(clean_source_tags)
+
+    if question_ids:
+        clean_qids = [int(qid) for qid in question_ids[:200] if int(qid) > 0]
+        if not clean_qids:
+            return []
+        placeholders = ",".join("?" for _ in clean_qids)
+        clauses.append(f"q.id IN ({placeholders})")
+        params.extend(clean_qids)
     if source_tag:
         clauses.append("EXISTS (SELECT 1 FROM json_each(q.source_tags) WHERE json_each.value = ?)")
         params.append(source_tag)
@@ -225,6 +252,7 @@ def select_filtered_questions(
     topic_id: int | None = None,
     topic_ids: list[int] | None = None,
     source_tag: str | None = None,
+    source_tags: list[str] | None = None,
     limit: int = 20,
 ) -> list[sqlite3.Row]:
     rows = _fetch_question_candidates(
@@ -235,6 +263,7 @@ def select_filtered_questions(
         topic_id=topic_id,
         topic_ids=topic_ids,
         source_tag=source_tag,
+        source_tags=source_tags,
     )
     return fisher_yates_shuffle(rows)[:limit]
 
@@ -271,54 +300,80 @@ def create_quiz_session(
         if user is not None and not effective_topic_ids:
             effective_topic_ids = get_weakest_topic_ids(conn, user.id, limit=3)
 
-    rows = _fetch_question_candidates(
-        conn,
-        user_id=user_id,
-        subject_id=req.subject_id,
-        module_no=req.module_no,
-        topic_id=req.topic_id,
-        topic_ids=effective_topic_ids,
-        source_tag=req.source_tag,
-    )
-
-    if user is not None and req.mode == "mistakes":
-        mistake_rows = [
-            r
-            for r in rows
-            if int(r["wrong_cnt"]) > 0 or (0 < int(r["next_review_ts"]) <= now_ts)
-        ]
-        mistake_rows.sort(
-            key=lambda r: (
-                -(int(r["wrong_cnt"]) - int(r["correct_cnt"])),
-                -int(r["last_wrong_ts"]),
-                int(r["next_review_ts"]),
+    if req.mode == "bookmarks":
+        if user is None and not req.question_ids:
+            return QuizSessionResponse(
+                session_id=secrets.token_hex(8),
+                mode=req.mode,
+                hints_enabled=hints_requested,
+                total_questions=0,
+                questions=[],
             )
+        rows = _fetch_question_candidates(
+            conn,
+            user_id=user_id,
+            subject_id=req.subject_id,
+            module_no=req.module_no,
+            topic_id=req.topic_id,
+            topic_ids=effective_topic_ids,
+            question_ids=req.question_ids if user is None else None,
+            source_tag=req.source_tag,
+            source_tags=req.source_tags,
         )
-        chosen_rows = mistake_rows[: req.limit]
-    elif user is not None and req.mode in ("smart_mix", "weak_topics"):
-        due_rows = [r for r in rows if 0 < int(r["next_review_ts"]) <= now_ts]
-        due_rows.sort(key=lambda r: (int(r["next_review_ts"]), -int(r["wrong_cnt"])))
-        seen_ids = {int(r["id"]) for r in due_rows}
+        if user is not None:
+            rows = [r for r in rows if bool(r["bookmarked"])]
+        chosen_rows = fisher_yates_shuffle(rows)[: req.limit]
+    else:
+        rows = _fetch_question_candidates(
+            conn,
+            user_id=user_id,
+            subject_id=req.subject_id,
+            module_no=req.module_no,
+            topic_id=req.topic_id,
+            topic_ids=effective_topic_ids,
+            question_ids=req.question_ids,
+            source_tag=req.source_tag,
+            source_tags=req.source_tags,
+        )
 
-        unseen_rows = fisher_yates_shuffle(
-            [
+        if user is not None and req.mode == "mistakes":
+            mistake_rows = [
                 r
                 for r in rows
-                if int(r["id"]) not in seen_ids
-                and int(r["correct_cnt"]) == 0
-                and int(r["wrong_cnt"]) == 0
+                if int(r["wrong_cnt"]) > 0 or (0 < int(r["next_review_ts"]) <= now_ts)
             ]
-        )
-        for r in unseen_rows:
-            seen_ids.add(int(r["id"]))
+            mistake_rows.sort(
+                key=lambda r: (
+                    -(int(r["wrong_cnt"]) - int(r["correct_cnt"])),
+                    -int(r["last_wrong_ts"]),
+                    int(r["next_review_ts"]),
+                )
+            )
+            chosen_rows = mistake_rows[: req.limit]
+        elif user is not None and req.mode in ("smart_mix", "weak_topics"):
+            due_rows = [r for r in rows if 0 < int(r["next_review_ts"]) <= now_ts]
+            due_rows.sort(key=lambda r: (int(r["next_review_ts"]), -int(r["wrong_cnt"])))
+            seen_ids = {int(r["id"]) for r in due_rows}
 
-        rest_rows = fisher_yates_shuffle([r for r in rows if int(r["id"]) not in seen_ids])
-        # Balance overdue SM-2 reviews (up to 60%) with unseen / remaining items.
-        due_cap = max(1, int(req.limit * 0.6)) if (unseen_rows or rest_rows) else req.limit
-        chosen_rows = due_rows[:due_cap] + unseen_rows + due_rows[due_cap:] + rest_rows
-        chosen_rows = chosen_rows[: req.limit]
-    else:
-        chosen_rows = fisher_yates_shuffle(rows)[: req.limit]
+            unseen_rows = fisher_yates_shuffle(
+                [
+                    r
+                    for r in rows
+                    if int(r["id"]) not in seen_ids
+                    and int(r["correct_cnt"]) == 0
+                    and int(r["wrong_cnt"]) == 0
+                ]
+            )
+            for r in unseen_rows:
+                seen_ids.add(int(r["id"]))
+
+            rest_rows = fisher_yates_shuffle([r for r in rows if int(r["id"]) not in seen_ids])
+            # Balance overdue SM-2 reviews (up to 60%) with unseen / remaining items.
+            due_cap = max(1, int(req.limit * 0.6)) if (unseen_rows or rest_rows) else req.limit
+            chosen_rows = due_rows[:due_cap] + unseen_rows + due_rows[due_cap:] + rest_rows
+            chosen_rows = chosen_rows[: req.limit]
+        else:
+            chosen_rows = fisher_yates_shuffle(rows)[: req.limit]
 
     questions = [build_question_out(r) for r in chosen_rows]
     return QuizSessionResponse(
@@ -393,4 +448,148 @@ def reveal_question(conn: sqlite3.Connection, qid: int, salt: str | None = None)
         correct_text=options[correct_idx],
         correct_option_id=correct_option_id,
         explanation=get_cached_explanation(conn, qid),
+    )
+
+
+def list_bookmarked_questions(
+    conn: sqlite3.Connection,
+    *,
+    user: UserOut | None = None,
+    ids: list[int] | None = None,
+) -> BookmarksListResponse:
+    """Return verified bookmarked questions for an authenticated user or guest ID list."""
+    if user is not None:
+        rows = conn.execute(
+            """
+            SELECT
+                q.id,
+                q.subject_id,
+                s.title_uk AS subject_title,
+                q.topic_id,
+                t.module_no,
+                t.title_uk AS topic_title,
+                q.stem,
+                q.options_json,
+                q.source_tags,
+                qe.markers_json,
+                1 AS bookmarked
+            FROM user_progress up
+            JOIN questions q ON q.id = up.question_id AND q.status = 'verified'
+            JOIN subjects s ON s.id = q.subject_id
+            LEFT JOIN topics t ON t.id = q.topic_id
+            LEFT JOIN question_explanations qe ON qe.question_id = q.id
+            WHERE up.user_id = ? AND up.bookmarked = 1
+            ORDER BY up.updated_ts DESC, q.id DESC
+            LIMIT 200
+            """,
+            (user.id,),
+        ).fetchall()
+        items = [build_question_out(r) for r in rows]
+        return BookmarksListResponse(total=len(items), items=items)
+
+    clean_ids: list[int] = []
+    seen: set[int] = set()
+    for raw_id in ids or []:
+        if raw_id > 0 and raw_id not in seen:
+            seen.add(raw_id)
+            clean_ids.append(raw_id)
+        if len(clean_ids) >= 200:
+            break
+    if not clean_ids:
+        return BookmarksListResponse(total=0, items=[])
+
+    placeholders = ",".join("?" for _ in clean_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+            q.id,
+            q.subject_id,
+            s.title_uk AS subject_title,
+            q.topic_id,
+            t.module_no,
+            t.title_uk AS topic_title,
+            q.stem,
+            q.options_json,
+            q.source_tags,
+            qe.markers_json,
+            1 AS bookmarked
+        FROM questions q
+        JOIN subjects s ON s.id = q.subject_id
+        LEFT JOIN topics t ON t.id = q.topic_id
+        LEFT JOIN question_explanations qe ON qe.question_id = q.id
+        WHERE q.status = 'verified' AND q.id IN ({placeholders})
+        """,
+        clean_ids,
+    ).fetchall()
+    by_id = {int(r["id"]): build_question_out(r) for r in rows}
+    ordered = [by_id[qid] for qid in reversed(clean_ids) if qid in by_id]
+    return BookmarksListResponse(total=len(ordered), items=ordered)
+
+
+def submit_question_report(
+    conn: sqlite3.Connection,
+    *,
+    question_id: int,
+    reason: str,
+    comment: str = "",
+    user: UserOut | None = None,
+) -> QuestionReportResponse:
+    """Persist an error report on a verified question with basic duplicate suppression."""
+    exists = conn.execute(
+        "SELECT id FROM questions WHERE id = ? AND status = 'verified'",
+        (question_id,),
+    ).fetchone()
+    if exists is None:
+        raise LookupError("Питання не знайдено")
+
+    clean_comment = " ".join((comment or "").strip().split())[:500]
+    if reason == "other" and not clean_comment:
+        raise ValueError("Для причини «Інше» коротко опишіть помилку")
+
+    now_ts = int(time.time())
+    if user is not None:
+        dup = conn.execute(
+            """
+            SELECT id, reason, status
+            FROM question_reports
+            WHERE question_id = ? AND user_id = ? AND status = 'open' AND created_ts >= ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (question_id, user.id, now_ts - 86400),
+        ).fetchone()
+    else:
+        dup = conn.execute(
+            """
+            SELECT id, reason, status
+            FROM question_reports
+            WHERE question_id = ? AND user_id IS NULL AND reason = ? AND comment = ?
+              AND status = 'open' AND created_ts >= ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (question_id, reason, clean_comment, now_ts - 600),
+        ).fetchone()
+
+    if dup is not None:
+        return QuestionReportResponse(
+            id=int(dup["id"]),
+            question_id=question_id,
+            reason=dup["reason"],
+            status=dup["status"],
+            already_reported=True,
+        )
+
+    cur = conn.execute(
+        """
+        INSERT INTO question_reports (question_id, user_id, reason, comment, status, created_ts)
+        VALUES (?, ?, ?, ?, 'open', ?)
+        """,
+        (question_id, user.id if user is not None else None, reason, clean_comment, now_ts),
+    )
+    conn.commit()
+    return QuestionReportResponse(
+        id=int(cur.lastrowid),
+        question_id=question_id,
+        reason=reason,
+        status="open",
+        already_reported=False,
     )

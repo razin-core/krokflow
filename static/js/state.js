@@ -32,6 +32,12 @@ export function clearGuestBuffer() {
   }
 }
 
+export function clearGuestAttemptsOnly() {
+  const buf = loadGuestBuffer();
+  buf.attempts = {};
+  saveGuestBuffer(buf);
+}
+
 export function recordGuestAttempt(questionId, isCorrect, quality = null) {
   const buf = loadGuestBuffer();
   const key = String(questionId);
@@ -66,7 +72,7 @@ export function hasPendingGuestSync() {
 }
 
 export const state = {
-  screen: "dashboard", // 'dashboard' | 'mode' | 'quiz' | 'flashcards' | 'exam' | 'exam-results' | 'profile'
+  screen: "dashboard", // 'dashboard' | 'mode' | 'quiz' | 'flashcards' | 'exam' | 'exam-results' | 'profile' | 'bookmarks'
   health: null,
   auth: {
     enabled: false,
@@ -78,27 +84,46 @@ export const state = {
   subjects: [],
   expandedModules: new Set([1]),
 
+  // Bookmarks screen state
+  bookmarks: null,
+  bookmarksLoading: false,
+  revealedBookmarkIds: new Map(),
+
   // Dashboard search state
   searchQuery: "",
   searchResponse: null,
   searchLoading: false,
   revealedSearchIds: new Map(), // qid -> RevealOut
 
+  // Cascading selector state (Dashboard + Mode Selector)
+  cascade: {
+    subjectId: null, // null = all subjects, or numeric subject id
+    sourceKind: "all", // 'all' | 'thematic' | 'booklets' | 'kkr' | 'exam_bank' | 'm5'
+    itemKey: "all", // 'all' | 't:<topicId>' | 'tag:<sourceTag>' | 'multi'
+    itemKeys: [], // selected keys when 1+ items checked via checkboxes
+    totalTimeSec: null,
+    questionTimeSec: null,
+  },
+
   // Mode selection scope (Screen 2)
   selection: {
     subjectId: null,
-    subjectTitle: "Мікробіологія",
+    subjectTitle: "Усі предмети",
     moduleNo: null,
     topicId: null,
     topicIds: null,
     sourceTag: null,
+    sourceTags: null,
+    sourceKind: "all",
     limit: 20,
+    totalTimeSec: null,
+    questionTimeSec: null,
     hintsEnabled: false,
-    title: "Мікробіологія",
+    title: "Усі предмети КРОК-1",
   },
 
   // Screen 3: Quiz Training state
-  quiz: null, // { sessionId, title, questions, idx, answers, struck, showMarkers, explainingIds, xMode, finished }
+  quiz: null, // { sessionId, title, questions, idx, answers, struck, showMarkers, xMode, finished }
 
   // Screen 4: Flashcards state
   cards: null, // { title, queue, idx, flipped, reveals, showMarkers, ratings, finished }

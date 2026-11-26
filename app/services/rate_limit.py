@@ -54,3 +54,4 @@ class SlidingWindowLimiter:
 
 auth_ip_limiter = SlidingWindowLimiter(max_requests=10, window_sec=60)
 explain_ip_limiter = SlidingWindowLimiter(max_requests=15, window_sec=60)
+report_ip_limiter = SlidingWindowLimiter(max_requests=8, window_sec=60)

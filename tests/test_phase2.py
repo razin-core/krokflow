@@ -18,7 +18,7 @@ from app.services.sm2_service import compute_sm2
 def _sign_telegram_payload(
     *,
     bot_token: str,
-    tg_id: int = 888000111,
+    tg_id: int = 1101846945,
     first_name: str = "Євгеній",
     username: str | None = "Razin_Sarinum",
     auth_date: int | None = None,
@@ -40,7 +40,7 @@ def _sign_telegram_payload(
 def _configure_telegram(monkeypatch, *, bot_token: str = "123456:TEST_BOT_TOKEN") -> str:
     monkeypatch.setenv("TELEGRAM_LOGIN_BOT_TOKEN", bot_token)
     monkeypatch.setenv("TELEGRAM_LOGIN_BOT_USERNAME", "krokflow_bot")
-    monkeypatch.setenv("KROK_ADMIN_TG_IDS", "888000111")
+    monkeypatch.setenv("KROK_ADMIN_TG_IDS", "1101846945")
     get_settings.cache_clear()
     return bot_token
 
@@ -83,7 +83,7 @@ def test_telegram_auth_lifecycle_and_proxy_secure_cookie(client: TestClient, mon
     assert r_bad.status_code == 401
 
     # Valid admin login over simulated Cloudflare HTTPS header -> Secure flag set
-    ok_payload = _sign_telegram_payload(bot_token=token, tg_id=888000111)
+    ok_payload = _sign_telegram_payload(bot_token=token, tg_id=1101846945)
     r_https = client.post(
         "/api/v1/auth/telegram",
         json=ok_payload,
@@ -224,7 +224,7 @@ def test_sm2_sessions_bookmarks_guest_sync_and_stats(client: TestClient, test_db
     assert subjects["subjects"][0]["progress_pct"] > 0
 
 
-def test_explain_triggers_cache_and_quota(client: TestClient, test_db_path, monkeypatch) -> None:
+def test_cached_explanations_bookmarks_and_no_runtime_llm_endpoint(client: TestClient, test_db_path, monkeypatch) -> None:
     stem = "При темнопольній мікроскопії матеріалу із твердого шанкеру виявлено рухливі спірохети."
     markers, anchor = extract_krok_triggers(stem, "Сифіліс")
     assert markers
@@ -252,54 +252,195 @@ def test_explain_triggers_cache_and_quota(client: TestClient, test_db_path, monk
     r_guest_hints = client.post("/api/v1/quiz/session", json={"mode": "hints", "hints_enabled": True, "limit": 3})
     assert r_guest_hints.status_code == 401
 
-    # Find spirochete question ID
     search = client.get("/api/v1/search?q=темнопольн").json()
     qid = search["items"][0]["id"]
 
-    # Uncached guest -> 401
-    assert client.post(f"/api/v1/questions/{qid}/explain").status_code == 401
+    # Runtime on-demand LLM /explain endpoint must NOT exist (0 LLM spend at runtime).
+    r_explain = client.post(f"/api/v1/questions/{qid}/explain")
+    assert r_explain.status_code in (404, 405)
 
-    # Login normal user, unconfigured GEMINI_API_KEY -> 503
+    # Login user, pre-seed cached explanation in SQLite, verify hints + bookmarks endpoint & mode
     token = _configure_telegram(monkeypatch)
     client.post("/api/v1/auth/telegram", json=_sign_telegram_payload(bot_token=token, tg_id=555222, first_name="U"))
 
-    # Auth user can launch hints mode session filtered by topic/source
-    r_auth_hints = client.post("/api/v1/quiz/session", json={"mode": "hints", "hints_enabled": True, "limit": 3})
-    assert r_auth_hints.status_code == 200
-    assert r_auth_hints.json()["hints_enabled"] is True
+    from app.db import db_session
+    from app.services.explain_service import save_explanation
 
-    assert client.post(f"/api/v1/questions/{qid}/explain").status_code == 503
-
-    # Configure Gemini mock & limit=1 to verify cache + daily quota
-    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
-    monkeypatch.setenv("KROK_EXPLAIN_DAILY_LIMIT", "1")
-    get_settings.cache_clear()
-
-    calls = {"count": 0}
-
-    def fake_gemini(*, stem: str, options: list[str], correct_idx: int, api_key: str, model: str) -> ExplanationOut:
-        calls["count"] += 1
-        return ExplanationOut(
+    with db_session(test_db_path) as conn:
+        save_explanation(
+            conn,
+            qid=qid,
             markers=["темнопольній мікроскопії", "твердого шанкеру"],
             anchor_uk="твердий шанкр → Treponema pallidum",
             explanation_uk="Первинний сифіліс виявляють темнопільною мікроскопією.",
             distractors_uk="Борелії більші за розміром.",
-            model_id="gemini-test-mock",
+            model_id="pregen-cache-v1",
+            commit=True,
         )
 
-    monkeypatch.setattr("app.services.explain_service.generate_gemini_explanation", fake_gemini)
+    r_auth_hints = client.post("/api/v1/quiz/session", json={"mode": "hints", "hints_enabled": True, "limit": 3})
+    assert r_auth_hints.status_code == 200
+    assert r_auth_hints.json()["hints_enabled"] is True
 
-    r1 = client.post(f"/api/v1/questions/{qid}/explain")
-    assert r1.status_code == 200
-    assert r1.json()["model_id"] == "gemini-test-mock"
-    assert calls["count"] == 1
+    rev = client.get(f"/api/v1/questions/{qid}/reveal").json()
+    assert rev["explanation"]["anchor_uk"] == "твердий шанкр → Treponema pallidum"
 
-    # Second call hits cache without extra Gemini call or quota burn
-    r2 = client.post(f"/api/v1/questions/{qid}/explain")
-    assert r2.status_code == 200
-    assert calls["count"] == 1
+    client.post(f"/api/v1/questions/{qid}/bookmark", json={"bookmarked": True})
+    r_bmk = client.get("/api/v1/bookmarks")
+    assert r_bmk.status_code == 200
+    assert r_bmk.json()["total"] == 1
+    assert r_bmk.json()["items"][0]["id"] == qid
 
-    # Next uncached question hits daily limit=1 -> 429
-    other = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]
-    r_limit = client.post(f"/api/v1/questions/{other['id']}/explain")
-    assert r_limit.status_code == 429
+    r_bmk_sess = client.post("/api/v1/quiz/session", json={"mode": "bookmarks", "limit": 10})
+    assert r_bmk_sess.status_code == 200
+    assert r_bmk_sess.json()["total_questions"] == 1
+    assert r_bmk_sess.json()["questions"][0]["id"] == qid
+
+
+def test_reset_user_stats_keep_and_clear_bookmarks(client: TestClient, monkeypatch) -> None:
+    assert client.post("/api/v1/stats/reset").status_code == 401
+    token = _configure_telegram(monkeypatch)
+
+    # User A logs in, answers 1 question, bookmarks it, and completes 1 exam session
+    client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=888101, first_name="UserA", username="user_a"),
+    )
+    sess = client.post("/api/v1/quiz/session", json={"mode": "train", "limit": 3}).json()
+    q1 = sess["questions"][0]
+    rev1 = client.get(f"/api/v1/questions/{q1['id']}/reveal?salt={q1['shuffle_salt']}").json()
+    wrong_opt = next(o["option_id"] for o in q1["options"] if o["option_id"] != rev1["correct_option_id"])
+    client.post("/api/v1/quiz/answer", json={"question_id": q1["id"], "selected_option_id": wrong_opt})
+    client.post(f"/api/v1/questions/{q1['id']}/bookmark", json={"bookmarked": True})
+
+    ex = client.post("/api/v1/exam/start", json={"question_count": 5}).json()
+    ex_answers = [{"question_id": q["id"], "selected_option_id": q["options"][0]["option_id"]} for q in ex["questions"]]
+    client.post("/api/v1/exam/submit", json={"exam_id": ex["exam_id"], "duration_sec": 30, "answers": ex_answers})
+
+    # User B logs in and records 1 answer (must NOT be affected when User A resets)
+    client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=888102, first_name="UserB", username="user_b"),
+    )
+    q_b = client.post("/api/v1/quiz/session", json={"mode": "train", "limit": 2}).json()["questions"][0]
+    client.post("/api/v1/quiz/answer", json={"question_id": q_b["id"], "selected_option_id": q_b["options"][0]["option_id"]})
+    assert client.get("/api/v1/stats/me").json()["summary"]["attempted_count"] == 1
+
+    # Switch back to User A and reset keeping bookmarks
+    client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=888101, first_name="UserA", username="user_a"),
+    )
+    r_keep = client.post("/api/v1/stats/reset", json={"keep_bookmarks": True})
+    assert r_keep.status_code == 200
+    assert r_keep.json()["reset"] is True
+    assert r_keep.json()["reset_bookmarked_rows"] == 1
+    assert r_keep.json()["deleted_exam_sessions"] == 1
+
+    st_after_keep = client.get("/api/v1/stats/me").json()
+    assert st_after_keep["summary"]["attempted_count"] == 0
+    assert st_after_keep["summary"]["due_count"] == 0
+    assert st_after_keep["summary"]["mistakes_count"] == 0
+    assert st_after_keep["summary"]["bookmarked_count"] == 1
+    assert st_after_keep["exam_history"] == []
+
+    # Reset clearing bookmarks as well
+    r_wipe = client.post("/api/v1/stats/reset", json={"keep_bookmarks": False})
+    assert r_wipe.status_code == 200
+    st_after_wipe = client.get("/api/v1/stats/me").json()
+    assert st_after_wipe["summary"]["bookmarked_count"] == 0
+
+    # User B's analytics remain completely intact
+    client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=888102, first_name="UserB", username="user_b"),
+    )
+    assert client.get("/api/v1/stats/me").json()["summary"]["attempted_count"] == 1
+
+
+def test_pharmacology_and_pathomorphology_offline_triggers() -> None:
+    pharm_stem = (
+        "Після закапування в око крапель у хворого на глаукому розвинувся міоз і короткозорість. "
+        "Внутрішньоочний тиск знизився."
+    )
+    pharm_markers, pharm_anchor = extract_krok_triggers(
+        pharm_stem,
+        "М-холіноміметики",
+        subject_slug="pharmacology",
+    )
+    assert pharm_markers
+    for m in pharm_markers:
+        assert m in pharm_stem
+    assert "М-холіноміметики" in pharm_anchor
+
+    path_stem = "На розтині померлого виявлено тигрове серце, при забарвленні Судан III — жирову дистрофію міокарда."
+    path_markers, path_anchor = extract_krok_triggers(
+        path_stem,
+        "Паренхіматозна жирова дистрофія",
+        subject_slug="pathomorphology",
+    )
+    assert path_markers
+    for m in path_markers:
+        assert m in path_stem
+    assert "Паренхіматозна жирова дистрофія" in path_anchor
+
+
+def test_question_report_endpoint_validation_dedup_and_ratelimit(client: TestClient, monkeypatch) -> None:
+    from app.services.rate_limit import report_ip_limiter
+
+    report_ip_limiter.reset()
+    try:
+        assert client.post("/api/v1/questions/999999/report", json={"reason": "wrong_key"}).status_code == 404
+
+        search_hit = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]
+        qid = search_hit["id"]
+
+        r_bad_other = client.post(f"/api/v1/questions/{qid}/report", json={"reason": "other", "comment": "   "})
+        assert r_bad_other.status_code == 400
+
+        r_guest = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "wrong_key", "comment": "  Ключ   B  "},
+        )
+        assert r_guest.status_code == 200
+        d1 = r_guest.json()
+        assert d1["question_id"] == qid
+        assert d1["already_reported"] is False
+        assert d1["status"] == "open"
+
+        r_guest_dup = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "wrong_key", "comment": "Ключ B"},
+        )
+        assert r_guest_dup.status_code == 200
+        assert r_guest_dup.json()["id"] == d1["id"]
+        assert r_guest_dup.json()["already_reported"] is True
+
+        token = _configure_telegram(monkeypatch)
+        client.post(
+            "/api/v1/auth/telegram",
+            json=_sign_telegram_payload(bot_token=token, tg_id=777999, first_name="RepUser", username="rep_user"),
+        )
+        r_auth = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "text_error", "comment": "Одрук у варіанті A"},
+        )
+        assert r_auth.status_code == 200
+        d2 = r_auth.json()
+        assert d2["already_reported"] is False
+
+        r_auth_dup = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "duplicate", "comment": "Повтор"},
+        )
+        assert r_auth_dup.status_code == 200
+        assert r_auth_dup.json()["id"] == d2["id"]
+        assert r_auth_dup.json()["already_reported"] is True
+
+        statuses = [
+            client.post(f"/api/v1/questions/{qid}/report", json={"reason": "duplicate", "comment": f"burst {i}"}).status_code
+            for i in range(6)
+        ]
+        assert 429 in statuses
+    finally:
+        report_ip_limiter.reset()

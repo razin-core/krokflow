@@ -23,6 +23,8 @@ def pregenerate_batch(
     limit: int = 0,
     sleep_sec: float = 0.8,
     upgrade_triggers: bool = False,
+    refresh_triggers: bool = False,
+    subject_slug: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict[str, int]:
     """Populate question_explanations in deterministic triggers mode or Gemini Flash batch mode."""
@@ -32,26 +34,29 @@ def pregenerate_batch(
         raise RuntimeError("GEMINI_API_KEY is empty. Configure /home/ubuntu/krok_trainer/.env first.")
 
     with db_session(db_path) as conn:
-        if upgrade_triggers:
-            sql = """
-                SELECT q.id, q.stem, q.options_json, q.correct_idx
-                FROM questions q
-                LEFT JOIN question_explanations qe ON qe.question_id = q.id
-                WHERE q.status = 'verified'
-                  AND (qe.question_id IS NULL OR qe.model_id = 'trigger-index-v1')
-                ORDER BY q.id
-            """
+        clauses = ["q.status = 'verified'"]
+        params: list[object] = []
+        if subject_slug:
+            clauses.append("s.slug = ?")
+            params.append(subject_slug)
+
+        if (upgrade_triggers and mode == "gemini") or (refresh_triggers and mode == "triggers"):
+            clauses.append("(qe.question_id IS NULL OR qe.model_id = 'trigger-index-v1')")
         else:
-            sql = """
-                SELECT q.id, q.stem, q.options_json, q.correct_idx
-                FROM questions q
-                LEFT JOIN question_explanations qe ON qe.question_id = q.id
-                WHERE q.status = 'verified' AND qe.question_id IS NULL
-                ORDER BY q.id
-            """
+            clauses.append("qe.question_id IS NULL")
+
+        where_sql = " AND ".join(clauses)
+        sql = f"""
+            SELECT q.id, q.stem, q.options_json, q.correct_idx, s.slug AS subject_slug
+            FROM questions q
+            JOIN subjects s ON s.id = q.subject_id
+            LEFT JOIN question_explanations qe ON qe.question_id = q.id
+            WHERE {where_sql}
+            ORDER BY q.id
+        """
         if limit > 0:
             sql += f" LIMIT {int(limit)}"
-        rows = conn.execute(sql).fetchall()
+        rows = conn.execute(sql, params).fetchall()
 
         processed = 0
         errors = 0
@@ -63,7 +68,11 @@ def pregenerate_batch(
             correct_text = options[correct_idx]
 
             if mode == "triggers":
-                markers, anchor = extract_krok_triggers(stem, correct_text)
+                markers, anchor = extract_krok_triggers(
+                    stem,
+                    correct_text,
+                    subject_slug=row["subject_slug"],
+                )
                 save_explanation(
                     conn,
                     qid=qid,
@@ -132,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0, help="Max questions to process (0 = all)")
     parser.add_argument("--sleep", type=float, default=0.8, help="Delay between Gemini calls (sec)")
     parser.add_argument("--upgrade-triggers", action="store_true", help="Upgrade trigger-index-v1 rows with Gemini")
+    parser.add_argument("--refresh-triggers", action="store_true", help="Recompute trigger-index-v1 rows offline")
+    parser.add_argument("--subject", default=None, help="Filter by subject slug (e.g. pharmacology)")
     parser.add_argument("--db", type=Path, default=None)
     args = parser.parse_args(argv)
 
@@ -140,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         sleep_sec=args.sleep,
         upgrade_triggers=args.upgrade_triggers,
+        refresh_triggers=args.refresh_triggers,
+        subject_slug=args.subject,
         db_path=args.db,
     )
     print(json.dumps(res, ensure_ascii=False))

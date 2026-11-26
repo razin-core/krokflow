@@ -1,6 +1,11 @@
 /** Main KrokFlow SPA controller covering all MVP & Phase 2 screens. */
 
-import { api } from "./api.js?v=2.3.0";
+import { api } from "./api.js?v=2.8.0";
+import {
+  createCascadeSelector,
+  resolveCascadeScope,
+  syncCascadeFromSelection,
+} from "./cascade_selector.js?v=2.8.0";
 import {
   appendHighlightedText,
   clear,
@@ -8,16 +13,17 @@ import {
   el,
   pluralUk,
   setupDialogLightDismiss,
-} from "./dom.js?v=2.3.0";
+} from "./dom.js?v=2.8.0";
 import {
+  clearGuestAttemptsOnly,
   clearGuestBuffer,
   hasPendingGuestSync,
   loadGuestBuffer,
   recordGuestAttempt,
   state,
   toggleGuestBookmark,
-} from "./state.js?v=2.3.0";
-import { initThemeToggle } from "./theme.js?v=2.3.0";
+} from "./state.js?v=2.8.0";
+import { initThemeToggle } from "./theme.js?v=2.8.0";
 
 const LETTERS = ["A", "B", "C", "D", "E"];
 const mainEl = document.getElementById("app-main");
@@ -26,8 +32,248 @@ const examNavDialog = document.getElementById("exam-nav-dialog");
 const examConfirmDialog = document.getElementById("exam-confirm-dialog");
 const infoDialog = document.getElementById("info-dialog");
 const authDialog = document.getElementById("auth-dialog");
+const resetStatsDialog = document.getElementById("reset-stats-dialog");
+const reportQuestionDialog = document.getElementById("report-question-dialog");
+
+let reportingQuestion = null;
+const reportedQuestionIds = new Set();
+
+function buildReportTriggerButton(q, { id = null } = {}) {
+  const sent = reportedQuestionIds.has(q.id);
+  const attrs = {
+    type: "button",
+    className: "btn btn-secondary btn-sm report-trigger-btn",
+    text: sent ? "✓ Скаргу надіслано" : "⚑ Поскаржитись на помилку",
+    onClick: () => openReportDialog(q),
+  };
+  if (id) attrs.id = id;
+  return el("button", attrs);
+}
+
+function openReportDialog(q) {
+  if (!reportQuestionDialog || !q) return;
+  reportingQuestion = q;
+  const form = document.getElementById("report-question-form");
+  const ctxEl = document.getElementById("report-dialog-context");
+  const commentEl = document.getElementById("report-comment-input");
+  const statusEl = document.getElementById("report-form-status");
+  const submitBtn = document.getElementById("report-submit-btn");
+
+  form?.reset();
+  commentEl?.removeAttribute("aria-invalid");
+  if (statusEl) {
+    statusEl.textContent = "";
+    statusEl.className = "report-form-status";
+  }
+  if (submitBtn) submitBtn.disabled = false;
+  if (ctxEl) {
+    const snippet = q.stem.length > 120 ? `${q.stem.slice(0, 120)}…` : q.stem;
+    ctxEl.textContent = `Питання #${q.id}: ${snippet}`;
+  }
+  reportQuestionDialog.showModal();
+}
 
 let searchTimer = null;
+const TOTAL_TIME_PRESETS = [300, 600, 900, 1800, 3600];
+const QUESTION_TIME_PRESETS = [15, 30, 45, 60, 90];
+const customTimerOpen = { total: false, question: false };
+
+function sanitizeTimerSec(raw, { min = 5, max = 14400 } = {}) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Math.trunc(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(max, Math.max(min, n));
+}
+
+function buildTimerConfigControls({ idPrefix, totalTimeSec, questionTimeSec, onChange }) {
+  let curTotal = sanitizeTimerSec(totalTimeSec, { min: 5, max: 14400 });
+  let curQ = sanitizeTimerSec(questionTimeSec, { min: 5, max: 600 });
+  const isCustomTotal =
+    customTimerOpen.total || (curTotal != null && !TOTAL_TIME_PRESETS.includes(curTotal));
+  const isCustomQ =
+    customTimerOpen.question || (curQ != null && !QUESTION_TIME_PRESETS.includes(curQ));
+
+  const grid = el("div", { className: "timer-config-grid" });
+
+  // 1. Total test time (minutes)
+  const totalSelId = `${idPrefix}-total-time-select`;
+  const totalCustomId = `${idPrefix}-total-time-custom`;
+  const totalSel = el("select", {
+    id: totalSelId,
+    name: "total_time_sec",
+    className: "brand-select",
+    onChange: (e) => {
+      const val = e.target.value;
+      if (val === "custom") {
+        customTimerOpen.total = true;
+        const nextVal = curTotal ?? 1200;
+        onChange({ totalTimeSec: nextVal, questionTimeSec: curQ });
+        requestAnimationFrame(() => {
+          const inp = document.getElementById(totalCustomId);
+          inp?.focus();
+          inp?.select?.();
+        });
+        return;
+      }
+      customTimerOpen.total = false;
+      onChange({ totalTimeSec: val ? Number(val) : null, questionTimeSec: curQ });
+    },
+  });
+  const totalChoices = [
+    { value: "", label: "Без обмеження" },
+    { value: "300", label: "5 хв" },
+    { value: "600", label: "10 хв" },
+    { value: "900", label: "15 хв" },
+    { value: "1800", label: "30 хв" },
+    { value: "3600", label: "60 хв" },
+    { value: "custom", label: "Свій час (хв)…" },
+  ];
+  const activeTotalOpt = isCustomTotal ? "custom" : curTotal != null ? String(curTotal) : "";
+  for (const ch of totalChoices) {
+    totalSel.appendChild(
+      el("option", { value: ch.value, text: ch.label, selected: activeTotalOpt === ch.value })
+    );
+  }
+
+  const totalRowChildren = [totalSel];
+  if (isCustomTotal) {
+    const commitTotalCustom = (rawStr, silent = false) => {
+      const cleaned = rawStr.trim();
+      if (!cleaned) {
+        if (curTotal !== null || !silent) {
+          curTotal = null;
+          onChange({ totalTimeSec: null, questionTimeSec: curQ, silent });
+        }
+        return;
+      }
+      const mins = Math.trunc(Number(cleaned));
+      if (!Number.isFinite(mins) || mins <= 0) return;
+      const clampedSec = Math.min(240, Math.max(1, mins)) * 60;
+      if (clampedSec !== curTotal || !silent) {
+        curTotal = clampedSec;
+        onChange({ totalTimeSec: curTotal, questionTimeSec: curQ, silent });
+      }
+    };
+    const defaultMins = curTotal != null ? Math.max(1, Math.round(curTotal / 60)) : 20;
+    const totalInput = el("input", {
+      id: totalCustomId,
+      name: "total_time_custom_min",
+      type: "text",
+      inputmode: "numeric",
+      pattern: "[0-9]*",
+      className: "timer-custom-input",
+      "aria-label": "Загальний час тесту у хвилинах",
+      value: String(defaultMins),
+      onInput: (e) => commitTotalCustom(e.target.value, true),
+      onKeydown: (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitTotalCustom(e.target.value, false);
+        }
+      },
+    });
+    totalRowChildren.push(
+      el("span", { className: "timer-custom-wrap" }, [totalInput, el("span", { className: "muted", text: "хв" })])
+    );
+  }
+
+  grid.appendChild(
+    el("div", { className: "cascade-field" }, [
+      el("label", { for: totalSelId, className: "cascade-label", text: "⏱ Загальний час тесту" }),
+      el("div", { className: "timer-field-row" }, totalRowChildren),
+    ])
+  );
+
+  // 2. Per-question time (seconds)
+  const qSelId = `${idPrefix}-question-time-select`;
+  const qCustomId = `${idPrefix}-question-time-custom`;
+  const qSel = el("select", {
+    id: qSelId,
+    name: "question_time_sec",
+    className: "brand-select",
+    onChange: (e) => {
+      const val = e.target.value;
+      if (val === "custom") {
+        customTimerOpen.question = true;
+        const nextVal = curQ ?? 25;
+        onChange({ totalTimeSec: curTotal, questionTimeSec: nextVal });
+        requestAnimationFrame(() => {
+          const inp = document.getElementById(qCustomId);
+          inp?.focus();
+          inp?.select?.();
+        });
+        return;
+      }
+      customTimerOpen.question = false;
+      onChange({ totalTimeSec: curTotal, questionTimeSec: val ? Number(val) : null });
+    },
+  });
+  const qChoices = [
+    { value: "", label: "Без обмеження" },
+    { value: "15", label: "15 сек" },
+    { value: "30", label: "30 сек" },
+    { value: "45", label: "45 сек" },
+    { value: "60", label: "60 сек" },
+    { value: "90", label: "90 сек" },
+    { value: "custom", label: "Свій час (сек)…" },
+  ];
+  const activeQOpt = isCustomQ ? "custom" : curQ != null ? String(curQ) : "";
+  for (const ch of qChoices) {
+    qSel.appendChild(
+      el("option", { value: ch.value, text: ch.label, selected: activeQOpt === ch.value })
+    );
+  }
+
+  const qRowChildren = [qSel];
+  if (isCustomQ) {
+    const commitQCustom = (rawStr, silent = false) => {
+      const cleaned = rawStr.trim();
+      if (!cleaned) {
+        if (curQ !== null || !silent) {
+          curQ = null;
+          onChange({ totalTimeSec: curTotal, questionTimeSec: null, silent });
+        }
+        return;
+      }
+      const secs = Math.trunc(Number(cleaned));
+      if (!Number.isFinite(secs) || secs <= 0) return;
+      const clampedSec = Math.min(600, Math.max(5, secs));
+      if (clampedSec !== curQ || !silent) {
+        curQ = clampedSec;
+        onChange({ totalTimeSec: curTotal, questionTimeSec: curQ, silent });
+      }
+    };
+    const qInput = el("input", {
+      id: qCustomId,
+      name: "question_time_custom_sec",
+      type: "text",
+      inputmode: "numeric",
+      pattern: "[0-9]*",
+      className: "timer-custom-input",
+      "aria-label": "Час на одне питання в секундах",
+      value: String(curQ ?? 25),
+      onInput: (e) => commitQCustom(e.target.value, true),
+      onKeydown: (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commitQCustom(e.target.value, false);
+        }
+      },
+    });
+    qRowChildren.push(
+      el("span", { className: "timer-custom-wrap" }, [qInput, el("span", { className: "muted", text: "с" })])
+    );
+  }
+
+  grid.appendChild(
+    el("div", { className: "cascade-field" }, [
+      el("label", { for: qSelId, className: "cascade-label", text: "⏳ Час на 1 питання" }),
+      el("div", { className: "timer-field-row" }, qRowChildren),
+    ])
+  );
+
+  return grid;
+}
 
 function announce(msg) {
   if (!announcerEl) return;
@@ -76,16 +322,19 @@ function showShortcutsModal() {
 }
 
 function showDatabaseInfoModal() {
-  const subj = state.subjects[0];
-  const verifiedCnt = state.health?.verified_questions ?? subj?.total_questions ?? 0;
+  const totalAll = state.subjects.reduce((acc, s) => acc + Number(s.total_questions || 0), 0);
+  const verifiedCnt = state.health?.verified_questions ?? totalAll;
   const reviewCnt = state.health?.needs_review_questions ?? 0;
+  const breakdown = state.subjects
+    .map((s) => `${s.icon} ${s.title_uk}: ${s.total_questions}`)
+    .join(" · ");
   const paragraphs = [
-    `У тренажері зараз ${verifiedCnt} ${pluralUk(verifiedCnt, ["верифіковане питання", "верифіковані питання", "верифікованих питань"])} з мікробіології, вірусології та імунології для підготовки до КРОК-1 / ЄДКІ.`,
+    `У тренажері зараз ${verifiedCnt} ${pluralUk(verifiedCnt, ["верифіковане питання", "верифіковані питання", "верифікованих питань"])} по ${state.subjects.length} ${pluralUk(state.subjects.length, ["предмету", "предметах", "предметах"])} КРОК-1 / ЄДКІ${breakdown ? ` (${breakdown})` : ""}.`,
     reviewCnt > 0
       ? `Ще ${reviewCnt} ${pluralUk(reviewCnt, ["питання", "питання", "питань"])} без надійно витягнутого ключа відповідей тимчасово приховано з активних тестів і симулятора іспиту, щоб не викривляти статистику.`
       : "Усі активні тести в базі мають перевірений ключ відповіді.",
-    "Повтори між модульними робочими зошитами та збірником ККР об'єднано в єдині картки, тому одне питання може належати до основного модуля й водночас мати тег перехресного джерела (наприклад, ККР або Вірусологія).",
-    "Миттєвий пошук індексує як умову клінічного кейса, так і всі варіанти відповідей A–E, а в режимах тренування й іспиту варіанти щоразу перемішуються незалежно.",
+    "Повтори між тематичними базами, буклетами КРОК та екзаменаційними банками дедупліковано в єдині картки зі збереженням тегів усіх джерел.",
+    "Миттєвий пошук індексує умову клінічного кейса та правильну відповідь по всіх предметах, а в режимах тренування й іспиту варіанти A–E щоразу перемішуються незалежно.",
   ];
   showInfoDialog("Про базу тестів KrokFlow", paragraphs);
 }
@@ -295,11 +544,21 @@ function openAuthDialog(contextHint = null) {
   authDialog.showModal();
 }
 
+function syncBookmarkCountBadges() {
+  const cnt = getBookmarkedCount();
+  const chipCntEl = document.querySelector("#dash-bookmarks-chip .chip-count");
+  if (chipCntEl) chipCntEl.textContent = String(cnt);
+  const kpiValEl = document.querySelector("#hero-bookmarks-kpi .kpi-value");
+  if (kpiValEl) kpiValEl.textContent = String(cnt);
+}
+
 async function handleBookmarkToggle(q, rerenderFn) {
-  const nextState = !isQuestionBookmarked(q);
+  const wasBookmarked = isQuestionBookmarked(q);
+  const nextState = !wasBookmarked;
   if (!state.auth.authenticated) {
     const saved = toggleGuestBookmark(q.id);
     q.bookmarked = saved;
+    syncBookmarkCountBadges();
     rerenderFn();
     announce(saved ? "Додано в закладки браузера" : "Прибрано із закладок");
     return;
@@ -307,6 +566,13 @@ async function handleBookmarkToggle(q, rerenderFn) {
   try {
     const res = await api.toggleBookmark(q.id, nextState);
     q.bookmarked = res.bookmarked;
+    if (state.stats?.summary && res.bookmarked !== wasBookmarked) {
+      state.stats.summary.bookmarked_count = Math.max(
+        0,
+        Number(state.stats.summary.bookmarked_count || 0) + (res.bookmarked ? 1 : -1)
+      );
+    }
+    syncBookmarkCountBadges();
     rerenderFn();
     announce(res.bookmarked ? "Збережено у закладки" : "Прибрано із закладок");
   } catch (err) {
@@ -314,24 +580,39 @@ async function handleBookmarkToggle(q, rerenderFn) {
   }
 }
 
-async function handleRequestAiExplanation(q, targetAnswerOrReveal, rerenderFn) {
-  if (!state.auth.authenticated) {
-    openAuthDialog("Онлайн AI-розбір доступний після входу через Telegram. Визначені клінічні маркери та «Якір КРОК» уже працюють безкоштовно.");
-    return;
+function getBookmarkedCount() {
+  if (state.auth.authenticated && state.stats?.summary) {
+    return Number(state.stats.summary.bookmarked_count || 0);
   }
-  if (state.quiz?.explainingIds) state.quiz.explainingIds.add(q.id);
-  rerenderFn();
+  const buf = loadGuestBuffer();
+  return buf.bookmarks.length;
+}
+
+async function loadBookmarksData() {
+  state.bookmarksLoading = true;
+  if (state.screen === "bookmarks") render();
   try {
-    const exp = await api.explainQuestion(q.id);
-    targetAnswerOrReveal.explanation = exp;
-    if (exp.markers?.length) q.markers = exp.markers;
-    announce("Розбір КРОК оновлено");
+    const ids = state.auth.authenticated ? [] : loadGuestBuffer().bookmarks;
+    const res = !state.auth.authenticated && !ids.length
+      ? { total: 0, items: [] }
+      : await api.getBookmarks(ids);
+    state.bookmarks = res;
   } catch (err) {
-    showInfoDialog("Пояснення КРОК", [err.message]);
+    state.bookmarks = { total: 0, items: [], error: err.message };
   } finally {
-    if (state.quiz?.explainingIds) state.quiz.explainingIds.delete(q.id);
-    rerenderFn();
+    state.bookmarksLoading = false;
+    if (state.screen === "bookmarks") render();
   }
+}
+
+async function openBookmarks(opts = {}) {
+  const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
+  stopQuizTimers();
+  stopExamTimer();
+  state.screen = "bookmarks";
+  setDocumentTitle("Закладки");
+  if (pushUrl) pushRoute("/bookmarks");
+  await loadBookmarksData();
 }
 
 // ---------- Navigation, History API Routing & Session Launchers ----------
@@ -348,39 +629,86 @@ function pushRoute(path, { replace = false } = {}) {
   }
 }
 
+function buildDashboardFilterUrl(cascade = state.cascade) {
+  const params = new URLSearchParams();
+  if (cascade.subjectId != null) params.set("subject", String(cascade.subjectId));
+  if (cascade.sourceKind && cascade.sourceKind !== "all") params.set("kind", cascade.sourceKind);
+  if (Array.isArray(cascade.itemKeys) && cascade.itemKeys.length > 1) {
+    params.set("items", cascade.itemKeys.join(","));
+  } else if (cascade.itemKeys?.length === 1) {
+    params.set("item", cascade.itemKeys[0]);
+  } else if (cascade.itemKey && cascade.itemKey !== "all" && cascade.itemKey !== "multi") {
+    params.set("item", cascade.itemKey);
+  }
+  if (cascade.totalTimeSec > 0) params.set("t_total", String(cascade.totalTimeSec));
+  if (cascade.questionTimeSec > 0) params.set("t_q", String(cascade.questionTimeSec));
+  const qs = params.toString();
+  return qs ? `/?${qs}` : "/";
+}
+
 function buildModeSelectorPath(sel = state.selection) {
   let base = "/";
   if (sel.topicId != null) base = `/topic/${sel.topicId}`;
   else if (sel.moduleNo != null) base = `/module/${sel.moduleNo}`;
   else if (sel.subjectId != null) base = `/subject/${sel.subjectId}`;
+  else base = "/subject/0";
   const params = new URLSearchParams();
+  if (sel.moduleNo != null && sel.subjectId != null && base.startsWith("/module/")) {
+    params.set("subject", String(sel.subjectId));
+  }
+  if (Array.isArray(sel.topicIds) && sel.topicIds.length) {
+    params.set("topics", sel.topicIds.join(","));
+  }
+  if (sel.sourceKind && sel.sourceKind !== "all") {
+    params.set("kind", sel.sourceKind);
+  }
   if (sel.sourceTag) params.set("source", sel.sourceTag);
+  if (Array.isArray(sel.sourceTags) && sel.sourceTags.length) {
+    params.set("tags", sel.sourceTags.join(","));
+  }
   if (sel.limit && sel.limit !== 20) params.set("limit", String(sel.limit));
   if (sel.hintsEnabled && state.auth.authenticated) params.set("hints", "1");
+  if (sel.totalTimeSec > 0) params.set("t_total", String(sel.totalTimeSec));
+  if (sel.questionTimeSec > 0) params.set("t_q", String(sel.questionTimeSec));
   const qs = params.toString();
   return qs ? `${base}?${qs}` : base;
 }
 
-function buildSessionQuery({ subjectId, moduleNo, topicId, topicIds, sourceTag, limit, hintsEnabled } = {}) {
+function buildSessionQuery({
+  subjectId,
+  moduleNo,
+  topicId,
+  topicIds,
+  sourceTag,
+  sourceTags,
+  limit,
+  hintsEnabled,
+  totalTimeSec,
+  questionTimeSec,
+} = {}) {
   const params = new URLSearchParams();
   if (subjectId != null) params.set("subject", String(subjectId));
   if (moduleNo != null) params.set("module", String(moduleNo));
   if (topicId != null) params.set("topic", String(topicId));
   if (Array.isArray(topicIds) && topicIds.length) params.set("topics", topicIds.join(","));
   if (sourceTag) params.set("source", sourceTag);
+  if (Array.isArray(sourceTags) && sourceTags.length) params.set("tags", sourceTags.join(","));
   if (limit && limit !== 20) params.set("limit", String(limit));
   if (hintsEnabled) params.set("hints", "1");
+  if (totalTimeSec > 0) params.set("t_total", String(totalTimeSec));
+  if (questionTimeSec > 0) params.set("t_q", String(questionTimeSec));
   return params.toString();
 }
 
 function goDashboard(opts = {}) {
   const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
+  stopQuizTimers();
   stopExamTimer();
   state.screen = "dashboard";
   setDocumentTitle("Дашборд");
   if (pushUrl) {
     const q = state.searchQuery.trim();
-    pushRoute(q ? `/search?q=${encodeURIComponent(q)}` : "/");
+    pushRoute(q ? `/search?q=${encodeURIComponent(q)}` : buildDashboardFilterUrl(state.cascade));
   }
   render();
   if (state.auth.authenticated) {
@@ -392,6 +720,7 @@ function goDashboard(opts = {}) {
 
 function openProfile(opts = {}) {
   const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
+  stopQuizTimers();
   stopExamTimer();
   state.screen = "profile";
   setDocumentTitle("Профіль та аналітика");
@@ -406,18 +735,30 @@ function openProfile(opts = {}) {
 
 function openModeSelector(scope, opts = {}) {
   const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
+  stopQuizTimers();
   stopExamTimer();
+  const totalTimeSec =
+    scope.totalTimeSec !== undefined ? sanitizeTimerSec(scope.totalTimeSec, { min: 5, max: 14400 }) : state.cascade.totalTimeSec;
+  const questionTimeSec =
+    scope.questionTimeSec !== undefined ? sanitizeTimerSec(scope.questionTimeSec, { min: 5, max: 600 }) : state.cascade.questionTimeSec;
   state.selection = {
     subjectId: scope.subjectId ?? null,
-    subjectTitle: scope.subjectTitle ?? "Мікробіологія",
+    subjectTitle: scope.subjectTitle ?? "Усі предмети",
     moduleNo: scope.moduleNo ?? null,
     topicId: scope.topicId ?? null,
     topicIds: scope.topicIds ?? null,
     sourceTag: scope.sourceTag ?? null,
+    sourceTags: scope.sourceTags ?? null,
+    sourceKind: scope.sourceKind ?? "all",
     limit: scope.limit ?? 20,
+    totalTimeSec: totalTimeSec ?? null,
+    questionTimeSec: questionTimeSec ?? null,
     hintsEnabled: Boolean(scope.hintsEnabled && state.auth.authenticated),
-    title: scope.title ?? scope.subjectTitle ?? "Мікробіологія",
+    title: scope.title ?? scope.subjectTitle ?? "Усі предмети КРОК-1",
   };
+  state.cascade.totalTimeSec = state.selection.totalTimeSec;
+  state.cascade.questionTimeSec = state.selection.questionTimeSec;
+  syncCascadeFromSelection(state.subjects, state.selection, state.cascade);
   state.screen = "mode";
   setDocumentTitle(state.selection.title);
   if (pushUrl) pushRoute(buildModeSelectorPath(state.selection));
@@ -431,21 +772,33 @@ async function startTraining(
     moduleNo = state.selection.moduleNo,
     topicId = state.selection.topicId,
     topicIds = state.selection.topicIds,
+    questionIds = null,
     sourceTag = state.selection.sourceTag,
+    sourceTags = state.selection.sourceTags,
     limit = state.selection.limit,
     hintsEnabled = Boolean(state.selection.hintsEnabled && state.auth.authenticated),
+    totalTimeSec = state.selection.totalTimeSec,
+    questionTimeSec = state.selection.questionTimeSec,
     title = state.selection.title,
   } = {},
   { pushUrl = true } = {}
 ) {
   try {
+    const cleanTotalSec = sanitizeTimerSec(totalTimeSec, { min: 5, max: 14400 });
+    const cleanQSec = sanitizeTimerSec(questionTimeSec, { min: 5, max: 600 });
+    const guestQuestionIds =
+      mode === "bookmarks" && !state.auth.authenticated && (!questionIds || !questionIds.length)
+        ? loadGuestBuffer().bookmarks
+        : questionIds;
     const resp = await api.startQuizSession({
       mode,
       subject_id: subjectId,
       module_no: moduleNo,
       topic_id: topicId,
       topic_ids: topicIds,
+      question_ids: guestQuestionIds,
       source_tag: sourceTag,
+      source_tags: sourceTags,
       limit,
       hints_enabled: Boolean(hintsEnabled || mode === "hints"),
     });
@@ -454,10 +807,14 @@ async function startTraining(
       const msg =
         mode === "mistakes"
           ? "У вас зараз немає активних помилок або прострочених повторень SM-2!"
-          : "За цими фільтрами не знайдено верифікованих питань. Спробуйте скинути фільтр джерела або теми.";
+          : mode === "bookmarks"
+            ? "Поки що немає збережених закладок для тренування."
+            : "За цими фільтрами не знайдено верифікованих питань. Спробуйте скинути фільтр джерела або теми.";
       showInfoDialog("Порожня вибірка", [msg]);
       return;
     }
+    stopQuizTimers();
+    stopExamTimer();
     state.quiz = {
       sessionId: resp.session_id,
       title,
@@ -465,9 +822,15 @@ async function startTraining(
       idx: 0,
       answers: new Map(),
       struck: new Map(),
+      summaryReveals: new Map(),
       hintsEnabled: Boolean(resp.hints_enabled),
       showMarkers: Boolean(resp.hints_enabled),
-      explainingIds: new Set(),
+      totalTimeSec: cleanTotalSec,
+      totalRemainingSec: cleanTotalSec,
+      questionTimeSec: cleanQSec,
+      questionRemainingSec: cleanQSec,
+      timerId: null,
+      timedOutReason: null,
       xMode: false,
       finished: false,
     };
@@ -480,12 +843,16 @@ async function startTraining(
         topicId,
         topicIds,
         sourceTag,
+        sourceTags,
         limit,
         hintsEnabled: Boolean(resp.hints_enabled),
+        totalTimeSec: cleanTotalSec,
+        questionTimeSec: cleanQSec,
       });
       pushRoute(qs ? `/mode/${encodeURIComponent(mode)}?${qs}` : `/mode/${encodeURIComponent(mode)}`);
     }
     render();
+    startQuizTimers();
     announce(`Почато тренування: ${resp.questions.length} ${pluralUk(resp.questions.length, ["питання", "питання", "питань"])}`);
   } catch (err) {
     if (!document.querySelector(".hero-card") && state.screen === "dashboard") render();
@@ -499,6 +866,8 @@ async function startTraining(
 
 async function startFlashcards(opts = {}) {
   const pushUrl = opts && typeof opts === "object" && "pushUrl" in opts ? opts.pushUrl : true;
+  stopQuizTimers();
+  stopExamTimer();
   try {
     const resp = await api.startQuizSession({
       mode: "flashcards",
@@ -507,6 +876,7 @@ async function startFlashcards(opts = {}) {
       topic_id: state.selection.topicId,
       topic_ids: state.selection.topicIds,
       source_tag: state.selection.sourceTag,
+      source_tags: state.selection.sourceTags,
       limit: state.selection.limit,
       hints_enabled: Boolean(state.selection.hintsEnabled && state.auth.authenticated),
     });
@@ -535,6 +905,7 @@ async function startFlashcards(opts = {}) {
         topicId: state.selection.topicId,
         topicIds: state.selection.topicIds,
         sourceTag: state.selection.sourceTag,
+        sourceTags: state.selection.sourceTags,
         limit: state.selection.limit,
         hintsEnabled: Boolean(resp.hints_enabled),
       });
@@ -552,17 +923,27 @@ async function startExamSimulator(
   {
     subjectId = null,
     moduleNo = null,
+    topicId = null,
+    topicIds = null,
     sourceTag = null,
+    sourceTags = null,
     questionCount = 150,
+    totalTimeSec = null,
+    questionTimeSec = null,
     title = "Симулятор іспиту КРОК-1",
   } = {},
   { pushUrl = true } = {}
 ) {
   try {
+    const cleanTotalSec = sanitizeTimerSec(totalTimeSec, { min: 5, max: 14400 });
+    const cleanQSec = sanitizeTimerSec(questionTimeSec, { min: 5, max: 600 });
     const resp = await api.startExam({
       subject_id: subjectId,
       module_no: moduleNo,
+      topic_id: topicId,
+      topic_ids: topicIds,
       source_tag: sourceTag,
+      source_tags: sourceTags,
       question_count: questionCount,
     });
     if (!resp.questions.length) {
@@ -570,7 +951,9 @@ async function startExamSimulator(
       showInfoDialog("Порожня вибірка", ["Недостатньо питань для старту симуляції іспиту."]);
       return;
     }
+    stopQuizTimers();
     stopExamTimer();
+    const initialDuration = cleanTotalSec ?? resp.duration_sec;
     state.exam = {
       examId: resp.exam_id,
       title,
@@ -579,8 +962,12 @@ async function startExamSimulator(
       selected: new Map(),
       flagged: new Set(),
       struck: new Map(),
-      remainingSec: resp.duration_sec,
-      totalDurationSec: resp.duration_sec,
+      timedOutIds: new Set(),
+      totalTimeSec: cleanTotalSec,
+      remainingSec: initialDuration,
+      totalDurationSec: initialDuration,
+      questionTimeSec: cleanQSec,
+      questionRemainingSec: cleanQSec,
       passThreshold: resp.pass_threshold_pct,
       startedMs: Date.now(),
       timerId: null,
@@ -594,8 +981,13 @@ async function startExamSimulator(
       const qs = buildSessionQuery({
         subjectId,
         moduleNo,
+        topicId,
+        topicIds,
         sourceTag,
+        sourceTags,
         limit: questionCount !== 150 ? questionCount : null,
+        totalTimeSec: cleanTotalSec,
+        questionTimeSec: cleanQSec,
       });
       pushRoute(qs ? `/exam?${qs}` : "/exam");
     }
@@ -609,27 +1001,45 @@ async function startExamSimulator(
 }
 
 async function applyRouteFromLocation() {
+  stopQuizTimers();
   stopExamTimer();
   const path = window.location.pathname || "/";
   const params = new URLSearchParams(window.location.search);
   const subj = state.subjects[0] || null;
   const sourceTag = params.get("source") || null;
+  const sourceTagsRaw = params.get("tags");
+  const sourceTags = sourceTagsRaw ? sourceTagsRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
+  const topicIdsRaw = params.get("topics");
+  const parsedTopicIds = topicIdsRaw ? topicIdsRaw.split(",").map(Number).filter(Boolean) : null;
   const limitParam = Number(params.get("limit") || 0);
   const limit = limitParam > 0 ? limitParam : 20;
   const hintsRequested = params.get("hints") === "1";
+  const sourceKind = params.get("kind") || null;
+  const totalTimeSec = sanitizeTimerSec(params.get("t_total"), { min: 5, max: 14400 });
+  const questionTimeSec = sanitizeTimerSec(params.get("t_q"), { min: 5, max: 600 });
 
   const modMatch = path.match(/^\/module\/(\d+)\/?$/);
-  if (modMatch && subj) {
+  if (modMatch) {
     const moduleNo = Number(modMatch[1]);
-    const mod = subj.modules.find((m) => m.module_no === moduleNo);
-    if (mod) {
+    const requestedSubjId = params.has("subject") ? Number(params.get("subject")) : null;
+    const targetSubj =
+      (requestedSubjId != null ? state.subjects.find((s) => s.id === requestedSubjId) : null) ||
+      state.subjects.find((s) => s.modules.some((m) => m.module_no === moduleNo)) ||
+      subj;
+    const mod = targetSubj?.modules.find((m) => m.module_no === moduleNo);
+    if (targetSubj && mod) {
       openModeSelector(
         {
-          subjectId: subj.id,
-          subjectTitle: subj.title_uk,
+          subjectId: targetSubj.id,
+          subjectTitle: targetSubj.title_uk,
           moduleNo: mod.module_no,
+          topicIds: parsedTopicIds,
           sourceTag,
+          sourceTags,
+          sourceKind,
           limit,
+          totalTimeSec,
+          questionTimeSec,
           hintsEnabled: hintsRequested,
           title: mod.title_uk,
         },
@@ -640,25 +1050,32 @@ async function applyRouteFromLocation() {
   }
 
   const topicMatch = path.match(/^\/topic\/(\d+)\/?$/);
-  if (topicMatch && subj) {
+  if (topicMatch) {
     const topicId = Number(topicMatch[1]);
-    for (const mod of subj.modules) {
-      const topic = mod.topics.find((t) => t.id === topicId);
-      if (topic) {
-        openModeSelector(
-          {
-            subjectId: subj.id,
-            subjectTitle: subj.title_uk,
-            moduleNo: mod.module_no,
-            topicId: topic.id,
-            sourceTag,
-            limit,
-            hintsEnabled: hintsRequested,
-            title: topic.title_uk,
-          },
-          { pushUrl: false }
-        );
-        return;
+    for (const s of state.subjects) {
+      for (const mod of s.modules) {
+        const topic = mod.topics.find((t) => t.id === topicId);
+        if (topic) {
+          openModeSelector(
+            {
+              subjectId: s.id,
+              subjectTitle: s.title_uk,
+              moduleNo: mod.module_no,
+              topicId: topic.id,
+              topicIds: parsedTopicIds,
+              sourceTag,
+              sourceTags,
+              sourceKind,
+              limit,
+              totalTimeSec,
+              questionTimeSec,
+              hintsEnabled: hintsRequested,
+              title: topic.title_uk,
+            },
+            { pushUrl: false }
+          );
+          return;
+        }
       }
     }
   }
@@ -666,16 +1083,48 @@ async function applyRouteFromLocation() {
   const subjMatch = path.match(/^\/subject\/(\d+)\/?$/);
   if (subjMatch) {
     const sid = Number(subjMatch[1]);
+    if (sid === 0) {
+      openModeSelector(
+        {
+          subjectId: null,
+          subjectTitle: "Усі предмети",
+          topicIds: parsedTopicIds,
+          sourceTag,
+          sourceTags,
+          sourceKind,
+          limit,
+          totalTimeSec,
+          questionTimeSec,
+          hintsEnabled: hintsRequested,
+          title: parsedTopicIds?.length
+            ? `Обрано ${parsedTopicIds.length} ${pluralUk(parsedTopicIds.length, ["тему", "теми", "тем"])}`
+            : sourceTag
+              ? `Усі предмети · ${sourceTag}`
+              : "Усі предмети КРОК-1",
+        },
+        { pushUrl: false }
+      );
+      return;
+    }
     const targetSubj = state.subjects.find((s) => s.id === sid) || subj;
     if (targetSubj) {
       openModeSelector(
         {
           subjectId: targetSubj.id,
           subjectTitle: targetSubj.title_uk,
+          topicIds: parsedTopicIds,
           sourceTag,
+          sourceTags,
+          sourceKind,
           limit,
+          totalTimeSec,
+          questionTimeSec,
           hintsEnabled: hintsRequested,
-          title: sourceTag === "ККР" ? `ККР · ${targetSubj.title_uk}` : targetSubj.title_uk,
+          title: parsedTopicIds?.length
+            ? `Обрано ${parsedTopicIds.length} ${pluralUk(parsedTopicIds.length, ["тему", "теми", "тем"])}`
+            : sourceTag
+              ? `${targetSubj.title_uk} · ${sourceTag}`
+              : targetSubj.title_uk,
         },
         { pushUrl: false }
       );
@@ -686,22 +1135,24 @@ async function applyRouteFromLocation() {
   const modeMatch = path.match(/^\/mode\/([a-z0-9_-]+)\/?$/i);
   if (modeMatch) {
     const mode = modeMatch[1];
-    const subjectId = params.has("subject") ? Number(params.get("subject")) : subj?.id ?? null;
+    const subjectId = params.has("subject") ? Number(params.get("subject")) : null;
     const moduleNo = params.has("module") ? Number(params.get("module")) : null;
     const topicId = params.has("topic") ? Number(params.get("topic")) : null;
-    const topicIdsRaw = params.get("topics");
-    const topicIds = topicIdsRaw ? topicIdsRaw.split(",").map(Number).filter(Boolean) : null;
-    let title = subj?.title_uk ?? "Мікробіологія";
-    if (topicId != null && subj) {
-      for (const m of subj.modules) {
+    const topicIds = parsedTopicIds;
+    const targetSubj = subjectId != null ? state.subjects.find((s) => s.id === subjectId) : subj;
+    let title = subjectId != null ? (targetSubj?.title_uk ?? "КРОК-1") : "Обрані теми КРОК-1";
+    if (topicIds?.length) {
+      title = `Обрано ${topicIds.length} ${pluralUk(topicIds.length, ["тему", "теми", "тем"])}`;
+    } else if (topicId != null && targetSubj) {
+      for (const m of targetSubj.modules) {
         const t = m.topics.find((x) => x.id === topicId);
         if (t) {
           title = t.title_uk;
           break;
         }
       }
-    } else if (moduleNo != null && subj) {
-      const m = subj.modules.find((x) => x.module_no === moduleNo);
+    } else if (moduleNo != null && targetSubj) {
+      const m = targetSubj.modules.find((x) => x.module_no === moduleNo);
       if (m) title = m.title_uk;
     } else if (mode === "smart_mix") {
       title = "Розумна сесія · Мікс";
@@ -717,7 +1168,10 @@ async function applyRouteFromLocation() {
       topicId,
       topicIds,
       sourceTag,
+      sourceTags,
       limit,
+      totalTimeSec,
+      questionTimeSec,
       hintsEnabled: Boolean(hintsRequested && state.auth.authenticated),
       title,
     };
@@ -729,7 +1183,10 @@ async function applyRouteFromLocation() {
         topicId,
         topicIds,
         sourceTag,
+        sourceTags,
         limit,
+        totalTimeSec,
+        questionTimeSec,
         hintsEnabled: hintsRequested,
         title,
       },
@@ -739,11 +1196,10 @@ async function applyRouteFromLocation() {
   }
 
   if (path === "/flashcards") {
-    const subjectId = params.has("subject") ? Number(params.get("subject")) : subj?.id ?? null;
+    const subjectId = params.has("subject") ? Number(params.get("subject")) : null;
     const moduleNo = params.has("module") ? Number(params.get("module")) : null;
     const topicId = params.has("topic") ? Number(params.get("topic")) : null;
-    const topicIdsRaw = params.get("topics");
-    const topicIds = topicIdsRaw ? topicIdsRaw.split(",").map(Number).filter(Boolean) : null;
+    const topicIds = parsedTopicIds;
     state.selection = {
       ...state.selection,
       subjectId,
@@ -751,6 +1207,7 @@ async function applyRouteFromLocation() {
       topicId,
       topicIds,
       sourceTag,
+      sourceTags,
       limit,
       hintsEnabled: Boolean(hintsRequested && state.auth.authenticated),
     };
@@ -761,9 +1218,21 @@ async function applyRouteFromLocation() {
   if (path === "/exam") {
     const subjectId = params.has("subject") ? Number(params.get("subject")) : null;
     const moduleNo = params.has("module") ? Number(params.get("module")) : null;
+    const topicId = params.has("topic") ? Number(params.get("topic")) : null;
     const questionCount = limitParam > 0 ? limitParam : 150;
     await startExamSimulator(
-      { subjectId, moduleNo, sourceTag, questionCount, title: `Симулятор КРОК-1 (${questionCount})` },
+      {
+        subjectId,
+        moduleNo,
+        topicId,
+        topicIds: parsedTopicIds,
+        sourceTag,
+        sourceTags,
+        questionCount,
+        totalTimeSec,
+        questionTimeSec,
+        title: `Симулятор КРОК-1 (${questionCount})`,
+      },
       { pushUrl: false }
     );
     return;
@@ -776,6 +1245,11 @@ async function applyRouteFromLocation() {
     }
     goDashboard({ pushUrl: false });
     openAuthDialog("Увійдіть через Telegram, щоб відкрити профіль та аналітику.");
+    return;
+  }
+
+  if (path === "/bookmarks") {
+    await openBookmarks({ pushUrl: false });
     return;
   }
 
@@ -810,26 +1284,163 @@ async function applyRouteFromLocation() {
   state.searchQuery = "";
   state.searchResponse = null;
   state.searchLoading = false;
+  if (params.has("subject") || params.has("kind") || params.has("item") || params.has("items") || params.has("t_total") || params.has("t_q")) {
+    const rawSubj = params.get("subject");
+    state.cascade.subjectId = rawSubj && Number(rawSubj) > 0 ? Number(rawSubj) : null;
+    state.cascade.sourceKind = params.get("kind") || "all";
+    const itemsParam = params.get("items");
+    if (itemsParam) {
+      state.cascade.itemKeys = itemsParam.split(",").map((s) => s.trim()).filter(Boolean);
+      state.cascade.itemKey = state.cascade.itemKeys.length > 1 ? "multi" : (state.cascade.itemKeys[0] || "all");
+    } else {
+      const singleItem = params.get("item") || "all";
+      state.cascade.itemKey = singleItem;
+      state.cascade.itemKeys = singleItem !== "all" ? [singleItem] : [];
+    }
+    state.cascade.totalTimeSec = totalTimeSec;
+    state.cascade.questionTimeSec = questionTimeSec;
+  }
   goDashboard({ pushUrl: false });
+}
+
+function stopQuizTimers() {
+  if (state.quiz && state.quiz.timerId) {
+    clearInterval(state.quiz.timerId);
+    state.quiz.timerId = null;
+  }
+}
+
+function advanceQuizStep() {
+  const qz = state.quiz;
+  if (!qz) return;
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+  if (qz.idx + 1 < qz.questions.length) {
+    qz.idx++;
+    if (qz.questionTimeSec != null) {
+      qz.questionRemainingSec = qz.questionTimeSec;
+    }
+  } else {
+    qz.finished = true;
+    stopQuizTimers();
+  }
+  render();
+}
+
+function startQuizTimers() {
+  stopQuizTimers();
+  const qz = state.quiz;
+  if (!qz || (qz.totalTimeSec == null && qz.questionTimeSec == null)) return;
+
+  qz.timerId = setInterval(() => {
+    const cur = state.quiz;
+    if (!cur || state.screen !== "quiz" || cur.finished) {
+      stopQuizTimers();
+      return;
+    }
+
+    if (cur.totalRemainingSec != null) {
+      cur.totalRemainingSec = Math.max(0, cur.totalRemainingSec - 1);
+      const totalPill = document.getElementById("quiz-total-timer");
+      if (totalPill) {
+        totalPill.textContent = `⏱ ${formatDuration(cur.totalRemainingSec)}`;
+        const lowThreshold = Math.min(60, Math.ceil((cur.totalTimeSec || 60) * 0.2));
+        totalPill.classList.toggle("is-low", cur.totalRemainingSec <= lowThreshold);
+      }
+      if (cur.totalRemainingSec === 0) {
+        cur.timedOutReason = "total";
+        cur.finished = true;
+        stopQuizTimers();
+        announce("Загальний час тесту вичерпано. Сесію завершено.");
+        render();
+        return;
+      }
+    }
+
+    if (cur.questionRemainingSec != null) {
+      const q = cur.questions[cur.idx];
+      if (q && !cur.answers.has(q.id)) {
+        cur.questionRemainingSec = Math.max(0, cur.questionRemainingSec - 1);
+        const qPill = document.getElementById("quiz-question-timer");
+        if (qPill) {
+          qPill.textContent = `⏳ ${formatDuration(cur.questionRemainingSec)}`;
+          const qLow = Math.min(10, Math.ceil((cur.questionTimeSec || 15) * 0.25));
+          qPill.classList.toggle("is-low", cur.questionRemainingSec <= qLow);
+        }
+        if (cur.questionRemainingSec === 0) {
+          cur.answers.set(q.id, {
+            question_id: q.id,
+            is_correct: false,
+            timed_out: true,
+            selected_option_id: null,
+            correct_option_id: null,
+            correct_text: null,
+          });
+          if (!state.auth.authenticated) {
+            recordGuestAttempt(q.id, false);
+          }
+          if (cur.idx + 1 < cur.questions.length) {
+            cur.idx++;
+            cur.questionRemainingSec = cur.questionTimeSec;
+            announce("Час на питання вийшов — питання не зараховано.");
+          } else {
+            cur.finished = true;
+            stopQuizTimers();
+            announce("Час на останнє питання вийшов. Сесію завершено.");
+          }
+          render();
+        }
+      }
+    }
+  }, 1000);
 }
 
 function startExamTimer() {
   stopExamTimer();
   if (!state.exam) return;
   state.exam.timerId = setInterval(() => {
-    if (!state.exam || state.screen !== "exam") {
+    const ex = state.exam;
+    if (!ex || state.screen !== "exam") {
       stopExamTimer();
       return;
     }
-    state.exam.remainingSec = Math.max(0, state.exam.remainingSec - 1);
+    ex.remainingSec = Math.max(0, ex.remainingSec - 1);
     const pill = document.getElementById("exam-timer-pill");
     if (pill) {
-      pill.textContent = `⏱ ${formatDuration(state.exam.remainingSec)}`;
-      pill.classList.toggle("is-low", state.exam.remainingSec <= 300);
+      pill.textContent = `⏱ ${formatDuration(ex.remainingSec)}`;
+      const lowLimit = ex.totalDurationSec ? Math.min(300, Math.ceil(ex.totalDurationSec * 0.2)) : 300;
+      pill.classList.toggle("is-low", ex.remainingSec <= lowLimit);
     }
-    if (state.exam.remainingSec === 0) {
+    if (ex.remainingSec === 0) {
       stopExamTimer();
       finalizeExam();
+      return;
+    }
+
+    if (ex.questionRemainingSec != null) {
+      const q = ex.questions[ex.idx];
+      if (q && !ex.selected.has(q.id) && !ex.timedOutIds.has(q.id)) {
+        ex.questionRemainingSec = Math.max(0, ex.questionRemainingSec - 1);
+        const qPill = document.getElementById("exam-question-timer");
+        if (qPill) {
+          qPill.textContent = `⏳ ${formatDuration(ex.questionRemainingSec)}`;
+          const qLow = Math.min(10, Math.ceil((ex.questionTimeSec || 15) * 0.25));
+          qPill.classList.toggle("is-low", ex.questionRemainingSec <= qLow);
+        }
+        if (ex.questionRemainingSec === 0) {
+          ex.timedOutIds.add(q.id);
+          if (ex.idx + 1 < ex.questions.length) {
+            ex.idx++;
+            ex.questionRemainingSec = ex.questionTimeSec;
+            announce("Час на питання вийшов — питання не зараховано.");
+            render();
+          } else {
+            stopExamTimer();
+            finalizeExam();
+          }
+        }
+      }
     }
   }, 1000);
 }
@@ -897,6 +1508,10 @@ function renderDashboard() {
     placeholder: "Пошук КРОК-1 за симптомом, збудником, реакцією…",
     value: state.searchQuery,
     autocomplete: "off",
+    autocorrect: "off",
+    autocapitalize: "none",
+    spellcheck: "false",
+    enterkeyhint: "search",
     onInput: (e) => {
       state.searchQuery = e.target.value;
       const hasInput = Boolean(state.searchQuery.length);
@@ -907,6 +1522,7 @@ function renderDashboard() {
       if (!q) {
         state.searchResponse = null;
         state.searchLoading = false;
+        setDocumentTitle("Дашборд");
         pushRoute("/", { replace: true });
         renderSearchResultsRegion();
         return;
@@ -957,6 +1573,7 @@ function renderDashboard() {
         searchInput.value = "";
         kbdHint.hidden = false;
         clearBtn.hidden = true;
+        setDocumentTitle("Дашборд");
         pushRoute("/", { replace: true });
         renderSearchResultsRegion();
         searchInput.focus();
@@ -974,69 +1591,49 @@ function renderDashboard() {
   ]);
   searchWrap.appendChild(searchBox);
 
-  // Quick-jump subject/module pills (naurok.ua pattern)
-  const subj = state.subjects[0];
-  if (subj) {
-    const pills = el("div", { className: "chips-row" });
-    pills.appendChild(
+  // Compact quick-jump bar (Bookmarks + active subject filter indicator)
+  const bmkCnt = getBookmarkedCount();
+  const quickBar = el("div", { className: "chips-row" }, [
+    el(
+      "button",
+      {
+        type: "button",
+        id: "dash-bookmarks-chip",
+        className: "chip",
+        onClick: () => openBookmarks(),
+      },
+      [el("span", { text: "🔖 Закладки" }), el("span", { className: "chip-count", text: bmkCnt })]
+    ),
+  ]);
+  for (const s of state.subjects) {
+    quickBar.appendChild(
       el(
         "button",
         {
           type: "button",
-          className: "chip active",
-          onClick: () => openModeSelector({ subjectId: subj.id, subjectTitle: subj.title_uk, title: subj.title_uk }),
+          className: `chip ${state.cascade.subjectId === s.id ? "active" : ""}`,
+          onClick: () => {
+            state.cascade.subjectId = state.cascade.subjectId === s.id ? null : s.id;
+            state.cascade.sourceKind = "all";
+            state.cascade.itemKey = "all";
+            state.cascade.itemKeys = [];
+            pushRoute(buildDashboardFilterUrl(state.cascade), { replace: true });
+            render();
+          },
         },
-        [el("span", { text: `${subj.icon} ${subj.title_uk}` }), el("span", { className: "chip-count", text: subj.total_questions })]
+        [el("span", { text: `${s.icon} ${s.title_uk}` }), el("span", { className: "chip-count", text: s.total_questions })]
       )
     );
-    for (const mod of subj.modules) {
-      const shortLabel = mod.title_uk.replace(/^Модуль\s+\d+\s*·\s*/, "М" + mod.module_no + " · ");
-      pills.appendChild(
-        el(
-          "button",
-          {
-            type: "button",
-            className: "chip",
-            onClick: () =>
-              openModeSelector({
-                subjectId: subj.id,
-                subjectTitle: subj.title_uk,
-                moduleNo: mod.module_no,
-                title: mod.title_uk,
-              }),
-          },
-          [el("span", { text: shortLabel }), el("span", { className: "chip-count", text: mod.question_count })]
-        )
-      );
-    }
-    if (subj.kkr_questions > 0) {
-      pills.appendChild(
-        el(
-          "button",
-          {
-            type: "button",
-            className: "chip",
-            onClick: () =>
-              openModeSelector({
-                subjectId: subj.id,
-                subjectTitle: subj.title_uk,
-                sourceTag: "ККР",
-                title: "ККР · Мікробіологія",
-              }),
-          },
-          [el("span", { text: "🎯 Тільки ККР" }), el("span", { className: "chip-count", text: subj.kkr_questions })]
-        )
-      );
-    }
-    searchWrap.appendChild(pills);
   }
+  searchWrap.appendChild(quickBar);
 
   const resultsRegion = el("div", { id: "search-results-region", className: "stack-sm" });
   searchWrap.appendChild(resultsRegion);
   root.appendChild(searchWrap);
 
   // Hero Quick-Start Card
-  const verifiedCnt = state.health?.verified_questions ?? subj?.total_questions ?? 0;
+  const totalAllSubjects = state.subjects.reduce((acc, s) => acc + Number(s.total_questions || 0), 0);
+  const verifiedCnt = state.health?.verified_questions ?? totalAllSubjects;
   const hero = el("section", { className: "card hero-card" }, [
     el("div", { className: "row-between" }, [
       el("div", {}, [
@@ -1073,9 +1670,14 @@ function renderDashboard() {
             el("span", { className: "kpi-value", text: `${state.stats.summary.overall_accuracy_pct}%` }),
             el("span", { className: "kpi-label", text: "Загальна точність" }),
           ]),
-          el("div", { className: "kpi-card" }, [
+          el("button", {
+            type: "button",
+            id: "hero-bookmarks-kpi",
+            className: "kpi-card kpi-card-btn",
+            onClick: () => openBookmarks(),
+          }, [
             el("span", { className: "kpi-value", text: `${state.stats.summary.bookmarked_count}` }),
-            el("span", { className: "kpi-label", text: "Збережені закладки" }),
+            el("span", { className: "kpi-label kpi-action-hint", text: "🔖 Збережені закладки →" }),
           ]),
         ])
       : null,
@@ -1085,14 +1687,33 @@ function renderDashboard() {
         id: "hero-smart-btn",
         className: "btn btn-primary",
         text: "▶ Розумна сесія (20 питань)",
-        onClick: () => startTraining({ mode: "smart_mix", limit: 20, title: "Розумна сесія · Мікс" }),
+        onClick: () =>
+          startTraining({
+            mode: "smart_mix",
+            subjectId: null,
+            moduleNo: null,
+            topicId: null,
+            topicIds: null,
+            sourceTag: null,
+            sourceTags: null,
+            totalTimeSec: null,
+            questionTimeSec: null,
+            limit: 20,
+            title: "Розумна сесія · Мікс",
+          }),
       }),
       el("button", {
         type: "button",
         id: "hero-exam-btn",
         className: "btn btn-secondary",
         text: "⏱ Симулятор іспиту (150)",
-        onClick: () => startExamSimulator({ questionCount: 150, title: "Симулятор КРОК-1 (150)" }),
+        onClick: () =>
+          startExamSimulator({
+            questionCount: 150,
+            totalTimeSec: null,
+            questionTimeSec: null,
+            title: "Симулятор КРОК-1 (150)",
+          }),
       }),
       el("button", {
         type: "button",
@@ -1100,7 +1721,19 @@ function renderDashboard() {
         className: "btn btn-secondary",
         onClick: () =>
           state.auth.authenticated
-            ? startTraining({ mode: "mistakes", limit: 25, title: "Помилки та повторення SM-2" })
+            ? startTraining({
+                mode: "mistakes",
+                subjectId: null,
+                moduleNo: null,
+                topicId: null,
+                topicIds: null,
+                sourceTag: null,
+                sourceTags: null,
+                totalTimeSec: null,
+                questionTimeSec: null,
+                limit: 25,
+                title: "Помилки та повторення SM-2",
+              })
             : openAuthDialog("Персональна черга помилок і повторень SM-2 працює після входу через Telegram."),
       }, state.auth.authenticated
         ? [state.stats?.summary?.due_count ? `🧠 Помилки / SM-2 (${state.stats.summary.due_count})` : "🧠 Помилки / SM-2"]
@@ -1111,7 +1744,19 @@ function renderDashboard() {
         className: "btn btn-secondary",
         onClick: () =>
           state.auth.authenticated
-            ? startTraining({ mode: "weak_topics", limit: 20, title: "Закрити 3 найслабші теми" })
+            ? startTraining({
+                mode: "weak_topics",
+                subjectId: null,
+                moduleNo: null,
+                topicId: null,
+                topicIds: null,
+                sourceTag: null,
+                sourceTags: null,
+                totalTimeSec: null,
+                questionTimeSec: null,
+                limit: 20,
+                title: "Закрити 3 найслабші теми",
+              })
             : openAuthDialog("Відпрацювання 3 найслабших тем за рейтингом SM-2 доступне після входу через Telegram."),
       }, state.auth.authenticated
         ? ["🔥 Закрити 3 слабкі теми"]
@@ -1134,110 +1779,127 @@ function renderDashboard() {
     ]);
   };
 
-  // Subject & Collapsible Modules Catalog
-  if (subj) {
-    const subjCard = el("section", { className: "card subject-card" }, [
+  // Cascading Subject -> Source/Type -> Topic/Year Selector Card
+  if (state.subjects.length) {
+    const cascadeUi = createCascadeSelector({
+      idPrefix: "dash-cascade",
+      subjects: state.subjects,
+      cascade: state.cascade,
+      onChange: () => {
+        pushRoute(buildDashboardFilterUrl(state.cascade), { replace: true });
+        render();
+      },
+    });
+    const resolved = cascadeUi.resolved;
+    const availableCount = Number(resolved.questionCount || 0);
+    const effectiveCount = Math.min(20, availableCount);
+    const isEmptyScope = availableCount <= 0;
+
+    const cascadeCard = el("section", { id: "cascade-selector-card", className: "card cascade-card" }, [
       el("div", { className: "row-between" }, [
         el("div", {}, [
-          el("h2", { text: `${subj.icon} ${subj.title_uk}` }),
+          el("h2", { style: "margin:0", text: "Конструктор тесту" }),
           el("p", {
             className: "muted",
             style: "margin:4px 0 0;font-size:13.5px",
-            text: `${subj.total_questions} ${pluralUk(subj.total_questions, ["питання", "питання", "питань"])} · ${subj.modules.length} ${pluralUk(subj.modules.length, ["модуль", "модулі", "модулів"])}`,
+            text: "Оберіть предмет, тип джерела та конкретну тему або рік буклету.",
           }),
-          renderProgressPill(subj),
         ]),
+        el("span", {
+          id: "cascade-count-badge",
+          className: "badge badge-accent",
+          text: `${availableCount} ${pluralUk(availableCount, ["питання", "питання", "питань"])}`,
+        }),
+      ]),
+      cascadeUi.element,
+      buildTimerConfigControls({
+        idPrefix: "dash-cascade",
+        totalTimeSec: state.cascade.totalTimeSec,
+        questionTimeSec: state.cascade.questionTimeSec,
+        onChange: ({ totalTimeSec, questionTimeSec, silent = false }) => {
+          state.cascade.totalTimeSec = totalTimeSec;
+          state.cascade.questionTimeSec = questionTimeSec;
+          pushRoute(buildDashboardFilterUrl(state.cascade), { replace: true });
+          if (!silent) render();
+        },
+      }),
+      isEmptyScope
+        ? el("p", {
+            className: "muted",
+            style: "margin:0;font-size:13.5px",
+            text: "За обраними фільтрами немає доступних питань — змініть джерело або тему.",
+          })
+        : null,
+      el("div", { className: "cascade-actions" }, [
         el("button", {
           type: "button",
-          className: "btn btn-primary btn-sm",
-          text: "Обрати режим →",
-          onClick: () => openModeSelector({ subjectId: subj.id, subjectTitle: subj.title_uk, title: subj.title_uk }),
+          id: "cascade-open-mode-btn",
+          className: "btn btn-primary",
+          disabled: isEmptyScope,
+          text: "🎯 Обрати режим →",
+          onClick: () =>
+            openModeSelector({
+              ...resolved,
+              limit: effectiveCount || 20,
+              totalTimeSec: state.cascade.totalTimeSec,
+              questionTimeSec: state.cascade.questionTimeSec,
+            }),
+        }),
+        el("button", {
+          type: "button",
+          id: "cascade-quick-train-btn",
+          className: "btn btn-secondary",
+          disabled: isEmptyScope,
+          text: isEmptyScope ? "▶ Немає питань за фільтром" : `▶ Тренування (${effectiveCount})`,
+          onClick: () =>
+            startTraining({
+              ...resolved,
+              mode: "train",
+              limit: effectiveCount,
+              totalTimeSec: state.cascade.totalTimeSec,
+              questionTimeSec: state.cascade.questionTimeSec,
+            }),
         }),
       ]),
     ]);
+    root.appendChild(cascadeCard);
 
-    const modsWrap = el("div", { className: "stack-sm" });
-    for (const mod of subj.modules) {
-      const isExpanded = state.expandedModules.has(mod.module_no);
-      const group = el("div", { className: "module-group" });
-      const modMeta = el("div", { className: "question-actions" }, [
-        renderProgressPill(mod),
-        el("span", { className: "badge", text: `${mod.question_count} ${pluralUk(mod.question_count, ["тест", "тести", "тестів"])}` }),
-      ]);
-      const header = el(
-        "button",
-        {
-          type: "button",
-          className: "module-header",
-          "aria-expanded": String(isExpanded),
-          onClick: () => {
-            if (state.expandedModules.has(mod.module_no)) {
-              state.expandedModules.delete(mod.module_no);
-            } else {
-              state.expandedModules.add(mod.module_no);
-            }
-            render();
-          },
-        },
-        [
-          el("span", { text: `${isExpanded ? "▾" : "▸"} ${mod.title_uk}` }),
-          modMeta,
-        ]
-      );
-      group.appendChild(header);
-
-      if (isExpanded) {
-        const list = el("div", { className: "topics-list" });
-        list.appendChild(
-          el(
-            "button",
-            {
-              type: "button",
-              className: "topic-row",
-              style: "font-weight:650",
-              onClick: () =>
-                openModeSelector({
-                  subjectId: subj.id,
-                  subjectTitle: subj.title_uk,
-                  moduleNo: mod.module_no,
-                  title: mod.title_uk,
-                }),
+    // Compact 3-subject overview cards
+    const subjGrid = el("section", { className: "subjects-overview-grid", "aria-label": "Дисципліни КРОК-1" });
+    for (const s of state.subjects) {
+      const topicsCnt = s.modules.reduce((acc, m) => acc + (m.topics?.length || 0), 0);
+      subjGrid.appendChild(
+        el(
+          "button",
+          {
+            type: "button",
+            className: `subject-mini-card ${state.cascade.subjectId === s.id ? "is-active" : ""}`,
+            onClick: () => {
+              state.cascade.subjectId = s.id;
+              state.cascade.sourceKind = "all";
+              state.cascade.itemKey = "all";
+              state.cascade.itemKeys = [];
+              pushRoute(buildDashboardFilterUrl(state.cascade), { replace: true });
+              render();
+              document.getElementById("cascade-selector-card")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
             },
-            [el("span", { text: `Усі питання: ${mod.title_uk}` }), el("span", { className: "muted", text: `${mod.question_count} →` })]
-          )
-        );
-        for (const topic of mod.topics) {
-          list.appendChild(
-            el(
-              "button",
-              {
-                type: "button",
-                className: "topic-row",
-                onClick: () =>
-                  openModeSelector({
-                    subjectId: subj.id,
-                    subjectTitle: subj.title_uk,
-                    moduleNo: mod.module_no,
-                    topicId: topic.id,
-                    title: topic.title_uk,
-                  }),
-              },
-              [
-                el("span", { text: topic.title_uk }),
-                el("span", { className: "question-actions" }, [
-                  renderProgressPill(topic),
-                  el("span", { className: "muted", text: `${topic.question_count} →` }),
-                ]),
-              ]
-            )
-          );
-        }
-        group.appendChild(list);
-      }
-      modsWrap.appendChild(group);
+          },
+          [
+            el("div", { className: "row-between" }, [
+              el("strong", { text: `${s.icon} ${s.title_uk}` }),
+              el("span", { className: "badge", text: `${s.total_questions}` }),
+            ]),
+            el("span", {
+              className: "muted",
+              style: "font-size:13px",
+              text: `${topicsCnt} ${pluralUk(topicsCnt, ["розділ", "розділи", "розділів"])}`,
+            }),
+            renderProgressPill(s),
+          ]
+        )
+      );
     }
-    subjCard.appendChild(modsWrap);
-    root.appendChild(subjCard);
+    root.appendChild(subjGrid);
   }
 
   mainEl.appendChild(root);
@@ -1353,16 +2015,45 @@ function renderSearchResultsRegion() {
 // ---------- Screen 2: Mode Selector (naurok.ua pattern) ----------
 
 function renderModeSelector() {
-  const subj = state.subjects[0];
   const sel = state.selection;
   const root = el("div", { className: "stack-lg" });
+
+  const cascadeUi = createCascadeSelector({
+    idPrefix: "mode-cascade",
+    subjects: state.subjects,
+    cascade: state.cascade,
+    onChange: (nextScope) => {
+      sel.subjectId = nextScope.subjectId;
+      sel.subjectTitle = nextScope.subjectTitle;
+      sel.moduleNo = nextScope.moduleNo;
+      sel.topicId = nextScope.topicId;
+      sel.topicIds = nextScope.topicIds ?? null;
+      sel.sourceTag = nextScope.sourceTag;
+      sel.sourceTags = nextScope.sourceTags ?? null;
+      sel.sourceKind = nextScope.sourceKind ?? "all";
+      sel.title = nextScope.title;
+      const nextMax = Math.min(Number(nextScope.questionCount || 0), 150);
+      if (nextMax > 0 && sel.limit > nextMax) {
+        sel.limit = nextMax;
+      }
+      setDocumentTitle(sel.title);
+      pushRoute(buildModeSelectorPath(sel), { replace: true });
+      render();
+    },
+  });
+  const availableCount = Number(cascadeUi.resolved.questionCount || 0);
+  const maxSelectable = Math.min(availableCount, 150);
+  const isEmptyScope = availableCount <= 0;
+  if (maxSelectable > 0 && sel.limit > maxSelectable) {
+    sel.limit = maxSelectable;
+  }
 
   root.appendChild(
     el("div", { className: "row-between" }, [
       el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← Назад", onClick: () => goDashboard() }),
       el("span", {
         className: "badge badge-accent",
-        text: subj ? `${subj.total_questions} ${pluralUk(subj.total_questions, ["тест", "тести", "тестів"])} у базі` : "",
+        text: `${availableCount} ${pluralUk(availableCount, ["тест", "тести", "тестів"])} у вибірці`,
       }),
     ])
   );
@@ -1370,131 +2061,45 @@ function renderModeSelector() {
   root.appendChild(
     el("div", {}, [
       el("h1", { text: sel.title }),
-      el("p", { className: "muted", style: "margin:0", text: "Оберіть фільтри джерела, кількість питань та формат тренування." }),
+      el("p", { className: "muted", style: "margin:0", text: "Оберіть предмет, джерело, тему або рік буклету та формат тренування." }),
     ])
   );
 
-  // Filters card
+  // Filters card with cascading dropdowns
   const filterCard = el("section", { className: "card stack-md" });
-  const sourceRow = el("div", { className: "stack-sm" }, [
-    el("span", { style: "font-weight:650;font-size:14px", text: "Фільтр джерела (включає перетини між модулями)" }),
-  ]);
-  const sourceChips = el("div", { className: "chips-row" });
-  const tagChoices = [{ label: "Усі джерела", value: null }];
-  const tagToModuleNo = {
-    "Загальна мікробіологія": 1,
-    "Вірусологія": 2,
-    "Спеціальна бактеріологія": 3,
-    "Тести по мікробі": 5,
-  };
-  if (subj?.source_tags?.length) {
-    for (const st of subj.source_tags) {
-      let lbl;
-      if (st.tag === "ККР") {
-        lbl = `🎯 Тільки ККР (${st.count} у базі)`;
-      } else {
-        const mNo = tagToModuleNo[st.tag];
-        const m = mNo ? subj.modules.find((x) => x.module_no === mNo) : null;
-        lbl =
-          m && m.question_count !== st.count
-            ? `${st.tag} (${m.question_count} у М${m.module_no} · ${st.count} всього)`
-            : `${st.tag} (${st.count})`;
-      }
-      tagChoices.push({ label: lbl, value: st.tag });
-    }
-  } else {
-    tagChoices.push(
-      { label: "🎯 Тільки ККР", value: "ККР" },
-      { label: "Загальна мікробіологія", value: "Загальна мікробіологія" },
-      { label: "Вірусологія", value: "Вірусологія" },
-      { label: "Спеціальна бактеріологія", value: "Спеціальна бактеріологія" },
-    );
-  }
-  for (const ch of tagChoices) {
-    sourceChips.appendChild(
-      el("button", {
-        type: "button",
-        className: `chip ${sel.sourceTag === ch.value ? "active" : ""}`,
-        text: ch.label,
-        onClick: () => {
-          sel.sourceTag = ch.value;
-          pushRoute(buildModeSelectorPath(sel), { replace: true });
-          render();
-        },
-      })
-    );
-  }
-  sourceRow.appendChild(sourceChips);
-  filterCard.appendChild(sourceRow);
+  filterCard.appendChild(cascadeUi.element);
 
-  // Topic dropdown if subject loaded
-  if (subj) {
-    const topicLabel = el("label", {
-      for: "mode-topic-select",
-      style: "font-weight:650;font-size:14px",
-      text: "Модуль / Тема",
-    });
-    const topicSelect = el("select", {
-      id: "mode-topic-select",
-      className: "select-control",
-      onChange: (e) => {
-        const val = e.target.value;
-        if (val === "all") {
-          sel.moduleNo = null;
-          sel.topicId = null;
-          sel.title = subj.title_uk;
-        } else if (val.startsWith("m:")) {
-          sel.moduleNo = Number(val.slice(2));
-          sel.topicId = null;
-          const m = subj.modules.find((x) => x.module_no === sel.moduleNo);
-          sel.title = m ? m.title_uk : subj.title_uk;
-        } else if (val.startsWith("t:")) {
-          sel.topicId = Number(val.slice(2));
-          sel.moduleNo = null;
-          for (const m of subj.modules) {
-            const t = m.topics.find((x) => x.id === sel.topicId);
-            if (t) sel.title = t.title_uk;
-          }
-        }
-        pushRoute(buildModeSelectorPath(sel), { replace: true });
-        render();
-      },
-    });
-    topicSelect.appendChild(el("option", { value: "all", text: `Уся дисципліна (${subj.total_questions})`, selected: sel.moduleNo === null && sel.topicId === null }));
-    for (const mod of subj.modules) {
-      topicSelect.appendChild(
-        el("option", {
-          value: `m:${mod.module_no}`,
-          text: `${mod.title_uk} (${mod.question_count})`,
-          selected: sel.moduleNo === mod.module_no && sel.topicId === null,
+  // Question count pills (clamped to availableCount so UI never promises 20 when only 10 exist)
+  const countChips = el("div", { className: "chips-row", id: "mode-limit-chips" });
+  if (maxSelectable > 0) {
+    const presetCounts = [10, 20, 30, 50].filter((c) => c < maxSelectable);
+    const allChoices = [...presetCounts, maxSelectable];
+    for (const cnt of allChoices) {
+      const isAllCap = cnt === maxSelectable;
+      const label = isAllCap
+        ? availableCount > 150
+          ? "Усі (до 150)"
+          : `Усі (${cnt})`
+        : `${cnt} ${pluralUk(cnt, ["питання", "питання", "питань"])}`;
+      countChips.appendChild(
+        el("button", {
+          type: "button",
+          className: `chip ${sel.limit === cnt ? "active" : ""}`,
+          text: label,
+          onClick: () => {
+            sel.limit = cnt;
+            pushRoute(buildModeSelectorPath(sel), { replace: true });
+            render();
+          },
         })
       );
-      for (const topic of mod.topics) {
-        topicSelect.appendChild(
-          el("option", {
-            value: `t:${topic.id}`,
-            text: `  ↳ ${topic.title_uk} (${topic.question_count})`,
-            selected: sel.topicId === topic.id,
-          })
-        );
-      }
     }
-    filterCard.appendChild(el("div", { className: "stack-sm" }, [topicLabel, topicSelect]));
-  }
-
-  // Question count pills
-  const countChips = el("div", { className: "chips-row" });
-  for (const cnt of [10, 20, 30, 50, 150]) {
+  } else {
     countChips.appendChild(
-      el("button", {
-        type: "button",
-        className: `chip ${sel.limit === cnt ? "active" : ""}`,
-        text: cnt === 150 ? "Усі (до 150)" : `${cnt} ${pluralUk(cnt, ["питання", "питання", "питань"])}`,
-        onClick: () => {
-          sel.limit = cnt;
-          pushRoute(buildModeSelectorPath(sel), { replace: true });
-          render();
-        },
+      el("span", {
+        className: "muted",
+        style: "font-size:13.5px",
+        text: "За обраними фільтрами немає доступних питань — змініть джерело або тему.",
       })
     );
   }
@@ -1503,6 +2108,22 @@ function renderModeSelector() {
       el("span", { style: "font-weight:650;font-size:14px", text: "Розмір вибірки" }),
       countChips,
     ])
+  );
+
+  filterCard.appendChild(
+    buildTimerConfigControls({
+      idPrefix: "mode-cascade",
+      totalTimeSec: sel.totalTimeSec,
+      questionTimeSec: sel.questionTimeSec,
+      onChange: ({ totalTimeSec, questionTimeSec, silent = false }) => {
+        sel.totalTimeSec = totalTimeSec;
+        sel.questionTimeSec = questionTimeSec;
+        state.cascade.totalTimeSec = totalTimeSec;
+        state.cascade.questionTimeSec = questionTimeSec;
+        pushRoute(buildModeSelectorPath(sel), { replace: true });
+        if (!silent) render();
+      },
+    })
   );
 
   filterCard.appendChild(
@@ -1538,7 +2159,8 @@ function renderModeSelector() {
     el("button", {
       type: "button",
       id: "mode-train-btn",
-      className: "mode-card",
+      className: `mode-card ${isEmptyScope ? "is-muted" : ""}`,
+      disabled: isEmptyScope,
       onClick: () => startTraining({ mode: "train" }),
     }, [
       el("span", { className: "mode-icon", "aria-hidden": "true", text: "🎯" }),
@@ -1557,7 +2179,8 @@ function renderModeSelector() {
     el("button", {
       type: "button",
       id: "mode-hints-btn",
-      className: `mode-card ${state.auth.authenticated ? "" : "is-muted"}`,
+      className: `mode-card ${state.auth.authenticated && !isEmptyScope ? "" : "is-muted"}`,
+      disabled: isEmptyScope,
       onClick: () =>
         state.auth.authenticated
           ? startTraining({
@@ -1586,7 +2209,8 @@ function renderModeSelector() {
     el("button", {
       type: "button",
       id: "mode-flashcards-btn",
-      className: "mode-card",
+      className: `mode-card ${isEmptyScope ? "is-muted" : ""}`,
+      disabled: isEmptyScope,
       onClick: startFlashcards,
     }, [
       el("span", { className: "mode-icon is-green", "aria-hidden": "true", text: "🃏" }),
@@ -1600,13 +2224,19 @@ function renderModeSelector() {
     el("button", {
       type: "button",
       id: "mode-exam-btn",
-      className: "mode-card",
+      className: `mode-card ${isEmptyScope ? "is-muted" : ""}`,
+      disabled: isEmptyScope,
       onClick: () =>
         startExamSimulator({
           subjectId: sel.subjectId,
           moduleNo: sel.moduleNo,
+          topicId: sel.topicId,
+          topicIds: sel.topicIds,
           sourceTag: sel.sourceTag,
+          sourceTags: sel.sourceTags,
           questionCount: Math.max(sel.limit, 150),
+          totalTimeSec: sel.totalTimeSec,
+          questionTimeSec: sel.questionTimeSec,
           title: `Іспит · ${sel.title}`,
         }),
     }, [
@@ -1704,10 +2334,30 @@ function renderQuiz() {
   const root = el("div", { className: "stack-md" });
 
   // Header & Progress bar
+  const totalLow = qz.totalRemainingSec != null && qz.totalRemainingSec <= Math.min(60, Math.ceil((qz.totalTimeSec || 60) * 0.2));
+  const qLow = qz.questionRemainingSec != null && qz.questionRemainingSec <= Math.min(10, Math.ceil((qz.questionTimeSec || 15) * 0.25));
+  const qPaused = Boolean(ans);
+
   const hdr = el("div", { className: "session-header" }, [
     el("div", { className: "row-between" }, [
       el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← Вийти", onClick: goDashboard }),
-      el("div", { className: "stat-badges" }, [
+      el("div", { className: "stat-badges quiz-timers-row" }, [
+        qz.totalRemainingSec != null
+          ? el("span", {
+              id: "quiz-total-timer",
+              className: `timer-pill ${totalLow ? "is-low" : ""}`,
+              title: "Загальний час, що залишився на тест",
+              text: `⏱ ${formatDuration(qz.totalRemainingSec)}`,
+            })
+          : null,
+        qz.questionRemainingSec != null
+          ? el("span", {
+              id: "quiz-question-timer",
+              className: `timer-pill ${!qPaused && qLow ? "is-low" : ""}`,
+              title: qPaused ? "Таймер питання на паузі під час перегляду розбору" : "Час на поточне питання",
+              text: `${qPaused ? "⏸" : "⏳"} ${formatDuration(qz.questionRemainingSec)}`,
+            })
+          : null,
         qz.hintsEnabled ? el("span", { className: "badge badge-amber", text: "💡 Підказки" }) : null,
         el("span", { className: "badge badge-accent", text: `${qz.idx + 1} / ${total}` }),
         el("span", { className: "badge", text: `Точність: ${accPct}%` }),
@@ -1839,21 +2489,13 @@ function renderQuiz() {
           id: "quiz-next-btn",
           className: "btn btn-primary btn-sm",
           text: qz.idx + 1 < total ? "Далі →" : "Завершити сесію →",
-          onClick: () => {
-            if (qz.idx + 1 < total) {
-              qz.idx++;
-            } else {
-              qz.finished = true;
-            }
-            render();
-          },
+          onClick: advanceQuizStep,
         }),
       ]),
       el("div", { text: `Правильна відповідь: ${ans.correct_text}` }),
     ];
 
     const exp = ans.explanation;
-    const isExplaining = qz.explainingIds?.has(q.id);
     if (exp) {
       const expNodes = [
         el("div", { className: "row-between" }, [
@@ -1869,46 +2511,28 @@ function renderQuiz() {
       if (exp.distractors_uk) {
         expNodes.push(el("div", { className: "muted", style: "font-size:13px", text: `Чому інші не підходять: ${exp.distractors_uk}` }));
       }
-      if (exp.model_id === "trigger-index-v1") {
-        expNodes.push(
-          el("div", {}, [
-            el("button", {
-              type: "button",
-              id: "quiz-ai-explain-btn",
-              className: "btn btn-secondary btn-sm",
-              disabled: isExplaining,
-              text: isExplaining ? "Генерація AI-розбору…" : "🤖 Поглиблений AI-розбір",
-              onClick: () => handleRequestAiExplanation(q, ans, render),
-            }),
-          ])
-        );
-      }
       verdictChildren.push(el("div", { className: "explain-box" }, expNodes));
-    } else {
-      verdictChildren.push(
-        el("div", {}, [
-          el("button", {
-            type: "button",
-            id: "quiz-ai-explain-btn",
-            className: "btn btn-secondary btn-sm",
-            disabled: isExplaining,
-            text: isExplaining ? "Генерація AI-розбору…" : "🤖 Згенерувати розбір КРОК",
-            onClick: () => handleRequestAiExplanation(q, ans, render),
-          }),
-        ])
-      );
     }
+
+    verdictChildren.push(
+      el("div", { className: "quiz-meta-footer" }, [
+        buildReportTriggerButton(q, { id: "quiz-report-btn" }),
+      ])
+    );
 
     root.appendChild(
       el("section", { className: `verdict-sheet ${ans.is_correct ? "is-correct" : "is-wrong"}` }, verdictChildren)
     );
   } else {
     root.appendChild(
-      el("p", {
-        className: "muted",
-        style: "margin:0;font-size:12.5px",
-        text: "Хоткеї ПК: 1–5 або A–E — відповідь · X потім 1–5 — закреслити варіант",
-      })
+      el("div", { className: "quiz-meta-footer" }, [
+        el("p", {
+          className: "muted",
+          style: "margin:0;font-size:12.5px",
+          text: "Хоткеї ПК: 1–5 або A–E — відповідь · X потім 1–5 — закреслити варіант",
+        }),
+        buildReportTriggerButton(q, { id: "quiz-report-btn" }),
+      ])
     );
   }
 
@@ -1917,26 +2541,36 @@ function renderQuiz() {
 
 function renderQuizSummary() {
   const qz = state.quiz;
+  stopQuizTimers();
   const total = qz.questions.length;
   let correctCnt = 0;
+  let timedOutCnt = 0;
   const missed = [];
   for (const q of qz.questions) {
     const a = qz.answers.get(q.id);
     if (a && a.is_correct) {
       correctCnt++;
     } else {
+      if (!a || a.timed_out) timedOutCnt++;
       missed.push({ q, a });
     }
   }
   const pct = total ? Math.round((correctCnt / total) * 100) : 0;
+  const summaryNote =
+    timedOutCnt > 0
+      ? `Правильно ${correctCnt} із ${total} ${pluralUk(total, ["питання", "питань", "питань"])} · Не зараховано через час: ${timedOutCnt} (${qz.title}).`
+      : `Правильно ${correctCnt} із ${total} ${pluralUk(total, ["питання", "питань", "питань"])} (${qz.title}).`;
 
   const root = el("div", { className: "stack-lg" }, [
     el("section", { className: "card stack-md" }, [
+      qz.timedOutReason === "total"
+        ? el("span", { id: "quiz-timeout-badge", className: "badge badge-red", text: "⏱ Загальний час тесту вичерпано" })
+        : null,
       el("h1", { text: `Сесію завершено: ${pct}%` }),
       el("p", {
         className: "muted",
         style: "margin:0",
-        text: `Правильно ${correctCnt} із ${total} ${pluralUk(total, ["питання", "питань", "питань"])} (${qz.title}).`,
+        text: summaryNote,
       }),
       el("div", { className: "hero-actions" }, [
         missed.length
@@ -1952,13 +2586,20 @@ function renderQuizSummary() {
                   idx: 0,
                   answers: new Map(),
                   struck: new Map(),
+                  summaryReveals: new Map(),
                   hintsEnabled: Boolean(qz.hintsEnabled),
                   showMarkers: Boolean(qz.hintsEnabled),
-                  explainingIds: new Set(),
+                  totalTimeSec: qz.totalTimeSec ?? null,
+                  totalRemainingSec: qz.totalTimeSec ?? null,
+                  questionTimeSec: qz.questionTimeSec ?? null,
+                  questionRemainingSec: qz.questionTimeSec ?? null,
+                  timerId: null,
+                  timedOutReason: null,
                   xMode: false,
                   finished: false,
                 };
                 render();
+                startQuizTimers();
               },
             })
           : null,
@@ -1969,14 +2610,39 @@ function renderQuizSummary() {
   ]);
 
   if (missed.length) {
-    const revWrap = el("section", { className: "stack-sm" }, [el("h2", { text: "Питання з помилками" })]);
+    const revWrap = el("section", { className: "stack-sm" }, [el("h2", { text: "Питання з помилками та пропуски" })]);
     for (const { q, a } of missed) {
-      revWrap.appendChild(
-        el("article", { className: "card stack-sm" }, [
-          el("p", { style: "margin:0;font-weight:550", text: q.stem }),
-          el("div", { className: "spoiler-answer", text: a ? `✓ ${a.correct_text}` : "Без відповіді" }),
-        ])
-      );
+      const cardNodes = [];
+      if (!a || a.timed_out) {
+        cardNodes.push(
+          el("span", { className: "badge badge-red", text: "⏱ Час вийшов — не зараховано" })
+        );
+      }
+      cardNodes.push(el("p", { style: "margin:0;font-weight:550", text: q.stem }));
+      const revealed = qz.summaryReveals?.get(q.id);
+      if (a && a.correct_text) {
+        cardNodes.push(el("div", { className: "spoiler-answer", text: `✓ ${a.correct_text}` }));
+      } else if (revealed) {
+        cardNodes.push(el("div", { className: "spoiler-answer", text: `✓ Правильна відповідь: ${revealed.correct_text}` }));
+      } else {
+        cardNodes.push(
+          el("div", {}, [
+            el("button", {
+              type: "button",
+              className: "btn btn-secondary btn-sm summary-reveal-btn",
+              text: "👁 Показати правильну відповідь",
+              onClick: async () => {
+                const rev = await api.revealQuestion(q.id, q.shuffle_salt);
+                if (!qz.summaryReveals) qz.summaryReveals = new Map();
+                qz.summaryReveals.set(q.id, rev);
+                render();
+              },
+            }),
+          ])
+        );
+      }
+      cardNodes.push(el("div", { className: "summary-card-footer" }, [buildReportTriggerButton(q)]));
+      revWrap.appendChild(el("article", { className: "card stack-sm" }, cardNodes));
     }
     root.appendChild(revWrap);
   }
@@ -2182,6 +2848,7 @@ function openExamNavigator() {
         "aria-label": `Питання ${idx + 1}${isAnswered ? ", є відповідь" : ""}${isFlagged ? ", під прапорцем" : ""}`,
         onClick: () => {
           ex.idx = idx;
+          if (ex.questionTimeSec != null) ex.questionRemainingSec = ex.questionTimeSec;
           examNavDialog.close();
           render();
         },
@@ -2211,8 +2878,11 @@ function renderExamRunner() {
   const q = ex.questions[ex.idx];
   const total = ex.questions.length;
   const selectedId = ex.selected.get(q.id);
+  const isTimedOutQ = Boolean(ex.timedOutIds?.has(q.id));
   const isFlagged = ex.flagged.has(q.id);
   const struckSet = ex.struck.get(q.id) || new Set();
+  const lowTotalLimit = ex.totalDurationSec ? Math.min(300, Math.ceil(ex.totalDurationSec * 0.2)) : 300;
+  const qLow = ex.questionRemainingSec != null && ex.questionRemainingSec <= Math.min(10, Math.ceil((ex.questionTimeSec || 15) * 0.25));
 
   const root = el("div", { className: "stack-md" });
 
@@ -2220,11 +2890,20 @@ function renderExamRunner() {
     el("div", { className: "session-header" }, [
       el("div", { className: "row-between" }, [
         el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← Вийти", onClick: goDashboard }),
-        el("span", {
-          id: "exam-timer-pill",
-          className: `timer-pill ${ex.remainingSec <= 300 ? "is-low" : ""}`,
-          text: `⏱ ${formatDuration(ex.remainingSec)}`,
-        }),
+        el("div", { className: "quiz-timers-row" }, [
+          el("span", {
+            id: "exam-timer-pill",
+            className: `timer-pill ${ex.remainingSec <= lowTotalLimit ? "is-low" : ""}`,
+            text: `⏱ ${formatDuration(ex.remainingSec)}`,
+          }),
+          ex.questionRemainingSec != null
+            ? el("span", {
+                id: "exam-question-timer",
+                className: `timer-pill ${!selectedId && !isTimedOutQ && qLow ? "is-low" : ""}`,
+                text: `${selectedId ? "⏸" : "⏳"} ${formatDuration(ex.questionRemainingSec)}`,
+              })
+            : null,
+        ]),
         el("div", { className: "topbar-actions" }, [
           el("button", {
             type: "button",
@@ -2252,6 +2931,7 @@ function renderExamRunner() {
     el("section", { className: "card stack-sm" }, [
       el("div", { className: "row-between" }, [
         el("span", { className: "badge badge-accent", text: `Питання ${ex.idx + 1} з ${total}` }),
+        isTimedOutQ ? el("span", { className: "badge badge-red", text: "⏱ Час вийшов — не зараховано" }) : null,
         el("button", {
           type: "button",
           className: `btn btn-sm ${isFlagged ? "btn-amber" : "btn-ghost"}`,
@@ -2278,7 +2958,9 @@ function renderExamRunner() {
       {
         type: "button",
         className: `option-btn ${isSel ? "is-selected" : isStruck ? "is-struck" : ""}`,
+        disabled: isTimedOutQ,
         onClick: () => {
+          if (isTimedOutQ) return;
           ex.selected.set(q.id, opt.option_id);
           render();
         },
@@ -2294,7 +2976,9 @@ function renderExamRunner() {
       "aria-pressed": String(isStruck),
       "aria-label": `Закреслити варіант ${letter}`,
       text: "—",
+      disabled: isTimedOutQ,
       onClick: () => {
+        if (isTimedOutQ) return;
         toggleStrike(ex.struck, q.id, opt.option_id);
         render();
       },
@@ -2313,6 +2997,7 @@ function renderExamRunner() {
         onClick: () => {
           if (ex.idx > 0) {
             ex.idx--;
+            if (ex.questionTimeSec != null) ex.questionRemainingSec = ex.questionTimeSec;
             render();
           }
         },
@@ -2324,6 +3009,7 @@ function renderExamRunner() {
         onClick: () => {
           if (ex.idx + 1 < total) {
             ex.idx++;
+            if (ex.questionTimeSec != null) ex.questionRemainingSec = ex.questionTimeSec;
             render();
           } else {
             openExamConfirm();
@@ -2368,12 +3054,19 @@ function renderExamResults() {
                 startTraining({
                   mode: "train",
                   topicIds: res.weakest_topic_ids,
+                  totalTimeSec: null,
+                  questionTimeSec: null,
                   limit: 20,
                   title: "Закриття слабких тем",
                 }),
             })
           : null,
-        el("button", { type: "button", className: "btn btn-primary", text: "Новий іспит", onClick: () => startExamSimulator() }),
+        el("button", {
+          type: "button",
+          className: "btn btn-primary",
+          text: "Новий іспит",
+          onClick: () => startExamSimulator({ totalTimeSec: ex.totalTimeSec ?? null, questionTimeSec: ex.questionTimeSec ?? null }),
+        }),
         el("button", { type: "button", className: "btn btn-secondary", text: "На головну", onClick: goDashboard }),
       ]),
     ])
@@ -2495,9 +3188,14 @@ function renderProfile() {
               el("span", { className: "kpi-value", text: `${st.summary.due_count}` }),
               el("span", { className: "kpi-label", text: "На повтор сьогодні" }),
             ]),
-            el("div", { className: "kpi-card" }, [
+            el("button", {
+              type: "button",
+              id: "profile-bookmarks-kpi",
+              className: "kpi-card kpi-card-btn",
+              onClick: () => openBookmarks(),
+            }, [
               el("span", { className: "kpi-value", text: `${st.summary.bookmarked_count}` }),
-              el("span", { className: "kpi-label", text: "Закладки" }),
+              el("span", { className: "kpi-label kpi-action-hint", text: "🔖 Закладки →" }),
             ]),
           ])
         : el("div", { className: "muted", text: "Завантаження аналітики…" }),
@@ -2506,13 +3204,39 @@ function renderProfile() {
           type: "button",
           className: "btn btn-primary",
           text: "🧠 Робота над помилками / SM-2",
-          onClick: () => startTraining({ mode: "mistakes", limit: 25, title: "Помилки та повтори SM-2" }),
+          onClick: () =>
+            startTraining({
+              mode: "mistakes",
+              subjectId: null,
+              moduleNo: null,
+              topicId: null,
+              topicIds: null,
+              sourceTag: null,
+              sourceTags: null,
+              totalTimeSec: null,
+              questionTimeSec: null,
+              limit: 25,
+              title: "Помилки та повтори SM-2",
+            }),
         }),
         el("button", {
           type: "button",
           className: "btn btn-secondary",
           text: "🔥 Закрити 3 слабкі теми",
-          onClick: () => startTraining({ mode: "weak_topics", limit: 20, title: "Закрити 3 найслабші теми" }),
+          onClick: () =>
+            startTraining({
+              mode: "weak_topics",
+              subjectId: null,
+              moduleNo: null,
+              topicId: null,
+              topicIds: null,
+              sourceTag: null,
+              sourceTags: null,
+              totalTimeSec: null,
+              questionTimeSec: null,
+              limit: 20,
+              title: "Закрити 3 найслабші теми",
+            }),
         }),
       ]),
     ])
@@ -2524,20 +3248,22 @@ function renderProfile() {
     ]);
     for (const wt of st.weakest_topics) {
       weakCard.appendChild(
-        el("div", { className: "row-between", style: "padding:8px 0;border-bottom:1px solid var(--border-subtle)" }, [
-          el("div", {}, [
+        el("div", { className: "weak-topic-row" }, [
+          el("div", { className: "weak-topic-info" }, [
             el("div", { style: "font-weight:600;font-size:14.5px", text: wt.title_uk }),
             el("div", { className: "muted", style: "font-size:12.5px", text: `Модуль ${wt.module_no} · ${wt.wrong_cnt} ${pluralUk(wt.wrong_cnt, ["помилка", "помилки", "помилок"])} · точність ${wt.accuracy_pct}%` }),
           ]),
           el("button", {
             type: "button",
-            className: "btn btn-secondary btn-sm",
+            className: "btn btn-secondary btn-sm weak-topic-btn",
             text: "Тренувати →",
             onClick: () =>
               startTraining({
                 mode: "smart_mix",
                 moduleNo: wt.module_no,
                 topicId: wt.topic_id,
+                totalTimeSec: null,
+                questionTimeSec: null,
                 limit: 20,
                 title: wt.title_uk,
               }),
@@ -2550,7 +3276,15 @@ function renderProfile() {
 
   if (st?.bookmarked_questions?.length) {
     const bmCard = el("section", { className: "card stack-sm" }, [
-      el("h2", { text: `Збережені закладки (${st.bookmarked_questions.length})` }),
+      el("div", { className: "row-between" }, [
+        el("h2", { text: `Збережені закладки (${st.bookmarked_questions.length})` }),
+        el("button", {
+          type: "button",
+          className: "btn btn-ghost btn-sm",
+          text: "Всі закладки →",
+          onClick: () => openBookmarks(),
+        }),
+      ]),
     ]);
     for (const bm of st.bookmarked_questions) {
       bmCard.appendChild(
@@ -2595,12 +3329,260 @@ function renderProfile() {
     root.appendChild(histCard);
   }
 
+  root.appendChild(
+    el("section", { id: "profile-reset-card", className: "card stack-sm danger-zone-card" }, [
+      el("h2", { style: "margin:0", text: "Керування прогресом" }),
+      el("p", {
+        className: "muted",
+        style: "margin:0;font-size:13.5px",
+        text: "Скиньте всю історію відповідей, точність по темах, повтори SM-2 та історію іспитів, щоб почати підготовку з чистого аркуша.",
+      }),
+      el("div", { className: "hero-actions" }, [
+        el("button", {
+          type: "button",
+          id: "profile-reset-stats-btn",
+          className: "btn btn-danger btn-sm",
+          text: "🗑 Скинути результати та аналітику",
+          onClick: () => {
+            const cb = document.getElementById("reset-keep-bookmarks");
+            if (cb) cb.checked = true;
+            resetStatsDialog?.showModal();
+          },
+        }),
+      ]),
+    ])
+  );
+
+  mainEl.appendChild(root);
+}
+
+// ---------- Screen 7: Saved Bookmarks (/bookmarks) ----------
+
+function renderBookmarks() {
+  const root = el("div", { className: "stack-lg" });
+  const data = state.bookmarks;
+  const items = data?.items || [];
+
+  root.appendChild(
+    el("div", { className: "row-between" }, [
+      el("button", { type: "button", className: "btn btn-ghost btn-sm", text: "← На головну", onClick: () => goDashboard() }),
+      el("span", {
+        className: "badge badge-accent",
+        text: `🔖 ${items.length} ${pluralUk(items.length, ["закладка", "закладки", "закладок"])}`,
+      }),
+    ])
+  );
+
+  const headerActions = items.length
+    ? [
+        el("button", {
+          type: "button",
+          id: "bookmarks-train-btn",
+          className: "btn btn-primary btn-sm",
+          text: `▶ Тренувати закладки (${items.length})`,
+          onClick: () =>
+            startTraining({
+              mode: "bookmarks",
+              questionIds: items.map((q) => q.id),
+              limit: Math.min(150, Math.max(items.length, 20)),
+              title: "Закладки",
+            }),
+        }),
+      ]
+    : [];
+
+  root.appendChild(
+    el("section", { className: "card stack-md" }, [
+      el("div", { className: "row-between" }, [
+        el("div", {}, [
+          el("h1", { text: "Збережені закладки" }),
+          el("p", {
+            className: "muted",
+            style: "margin:0",
+            text: state.auth.authenticated
+              ? "Персональна добірка питань КРОК-1, збережених у вашому профілі."
+              : "Локальна добірка браузера — синхронізується з профілем після входу через Telegram.",
+          }),
+        ]),
+        ...headerActions,
+      ]),
+    ])
+  );
+
+  if (state.bookmarksLoading) {
+    root.appendChild(el("div", { className: "card muted", text: "Завантаження закладок…" }));
+    mainEl.appendChild(root);
+    return;
+  }
+
+  if (data?.error) {
+    root.appendChild(el("div", { className: "card", text: `Не вдалося завантажити закладки: ${data.error}` }));
+    mainEl.appendChild(root);
+    return;
+  }
+
+  if (!items.length) {
+    root.appendChild(
+      el("section", { id: "bookmarks-empty-state", className: "card stack-md" }, [
+        el("div", { style: "font-weight:700;font-size:17px", text: "Поки що немає збережених закладок" }),
+        el("p", {
+          className: "muted",
+          style: "margin:0",
+          text: "Натискайте ☆ у картках пошуку, під час тренування або на флешкартках, щоб відкладати складні тести КРОК-1 сюди для швидкого повторення.",
+        }),
+        el("div", { className: "hero-actions" }, [
+          el("button", {
+            type: "button",
+            className: "btn btn-primary",
+            text: "🔍 Відкрити пошук тестів",
+            onClick: () => {
+              goDashboard();
+              requestAnimationFrame(() => document.getElementById("search-input")?.focus());
+            },
+          }),
+          el("button", {
+            type: "button",
+            className: "btn btn-secondary",
+            text: "Обрати тему",
+            onClick: () => {
+              const subj = state.subjects[0];
+              openModeSelector({
+                subjectId: subj?.id ?? null,
+                subjectTitle: subj?.title_uk ?? "Мікробіологія",
+                title: subj?.title_uk ?? "Мікробіологія",
+              });
+            },
+          }),
+        ]),
+      ])
+    );
+    mainEl.appendChild(root);
+    return;
+  }
+
+  for (const item of items) {
+    const tagsRow = el("div", { className: "chips-row" });
+    if (item.topic_title) {
+      tagsRow.appendChild(el("span", { className: "badge", text: item.topic_title }));
+    }
+    for (const tag of item.source_tags || []) {
+      tagsRow.appendChild(el("span", { className: "badge badge-accent", text: tag }));
+    }
+
+    const toolbar = el("div", { className: "question-toolbar" }, [
+      tagsRow,
+      el("button", {
+        type: "button",
+        className: "bookmark-btn",
+        "aria-pressed": "true",
+        "aria-label": "Прибрати із закладок",
+        text: "🔖",
+        onClick: async () => {
+          await handleBookmarkToggle(item, () => {});
+          state.bookmarks = {
+            ...state.bookmarks,
+            items: (state.bookmarks?.items || []).filter((x) => x.id !== item.id),
+          };
+          state.bookmarks.total = state.bookmarks.items.length;
+          if (state.auth.authenticated) {
+            refreshCatalogAndStats().catch(() => {});
+          }
+          render();
+        },
+      }),
+    ]);
+
+    const revealed = state.revealedBookmarkIds.get(item.id);
+    const cardChildren = [
+      toolbar,
+      el("p", { className: "search-stem", text: item.stem }),
+    ];
+    if (revealed) {
+      cardChildren.push(el("div", { className: "spoiler-answer", text: `✓ Правильна відповідь: ${revealed.correct_text}` }));
+      if (revealed.explanation?.anchor_uk) {
+        cardChildren.push(el("div", { className: "badge badge-amber", text: `✨ Якір КРОК: ${revealed.explanation.anchor_uk}` }));
+      }
+      if (revealed.explanation?.explanation_uk) {
+        cardChildren.push(el("div", { className: "muted", style: "font-size:13.5px", text: revealed.explanation.explanation_uk }));
+      }
+    } else {
+      cardChildren.push(
+        el("div", {}, [
+          el("button", {
+            type: "button",
+            className: "btn btn-secondary btn-sm",
+            text: "👁 Показати правильну відповідь",
+            onClick: async () => {
+              const rev = await api.revealQuestion(item.id, item.shuffle_salt);
+              state.revealedBookmarkIds.set(item.id, rev);
+              render();
+            },
+          }),
+        ])
+      );
+    }
+    root.appendChild(el("article", { className: "card search-result-card" }, cardChildren));
+  }
+
   mainEl.appendChild(root);
 }
 
 // ---------- Root Render & Global Keyboard Shortcuts ----------
 
+let lastRenderScreen = null;
+let lastRenderPathname = null;
+let lastQuizSessionId = null;
+let lastQuizIdx = null;
+let lastQuizFinished = null;
+let lastCardIdx = null;
+let lastCardFinished = null;
+let lastExamId = null;
+let lastExamIdx = null;
+
+function scrollPageToTop() {
+  try {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  } catch {
+    window.scrollTo(0, 0);
+  }
+}
+
+function blurFocusedElement({ keepSearch = false } = {}) {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return;
+  if (keepSearch && active.id === "search-input") return;
+  active.blur();
+}
+
 function render() {
+  const curPathname = window.location.pathname || "/";
+  const screenChanged = state.screen !== lastRenderScreen;
+  const pathSwapBetweenRootAndSearch =
+    (lastRenderPathname === "/" && curPathname === "/search") ||
+    (lastRenderPathname === "/search" && curPathname === "/");
+  const routeChanged =
+    lastRenderScreen !== null &&
+    curPathname !== lastRenderPathname &&
+    !(state.screen === "dashboard" && lastRenderScreen === "dashboard" && pathSwapBetweenRootAndSearch && document.activeElement?.id === "search-input");
+  const quizStepChanged =
+    state.screen === "quiz" &&
+    state.quiz &&
+    (state.quiz.sessionId !== lastQuizSessionId ||
+      state.quiz.idx !== lastQuizIdx ||
+      Boolean(state.quiz.finished) !== Boolean(lastQuizFinished));
+  const cardStepChanged =
+    state.screen === "flashcards" &&
+    state.cards &&
+    (state.cards.idx !== lastCardIdx || Boolean(state.cards.finished) !== Boolean(lastCardFinished));
+  const examStepChanged =
+    state.screen === "exam" &&
+    state.exam &&
+    (state.exam.examId !== lastExamId || state.exam.idx !== lastExamIdx);
+
+  if (screenChanged || routeChanged || quizStepChanged || cardStepChanged || examStepChanged) {
+    blurFocusedElement({ keepSearch: (screenChanged || routeChanged) && state.screen === "dashboard" });
+  }
+
   clear(mainEl);
   updateAuthHeaderPill();
   if (state.screen === "dashboard") renderDashboard();
@@ -2610,6 +3592,21 @@ function render() {
   else if (state.screen === "exam") renderExamRunner();
   else if (state.screen === "exam-results") renderExamResults();
   else if (state.screen === "profile") renderProfile();
+  else if (state.screen === "bookmarks") renderBookmarks();
+
+  if (screenChanged || routeChanged || quizStepChanged || cardStepChanged || examStepChanged) {
+    scrollPageToTop();
+  }
+
+  lastRenderScreen = state.screen;
+  lastRenderPathname = curPathname;
+  lastQuizSessionId = state.quiz?.sessionId ?? null;
+  lastQuizIdx = state.quiz?.idx ?? null;
+  lastQuizFinished = state.quiz?.finished ?? null;
+  lastCardIdx = state.cards?.idx ?? null;
+  lastCardFinished = state.cards?.finished ?? null;
+  lastExamId = state.exam?.examId ?? null;
+  lastExamIdx = state.exam?.idx ?? null;
 }
 
 function setupGlobalEvents() {
@@ -2629,8 +3626,104 @@ function setupGlobalEvents() {
   });
 
   examConfirmDialog?.addEventListener("close", () => {
-    if (examConfirmDialog.returnValue === "confirm") {
+    const val = examConfirmDialog.returnValue;
+    examConfirmDialog.returnValue = "";
+    if (val === "confirm") {
       finalizeExam();
+    }
+  });
+
+  resetStatsDialog?.addEventListener("close", async () => {
+    const val = resetStatsDialog.returnValue;
+    resetStatsDialog.returnValue = "";
+    if (val !== "confirm") return;
+    const keepBookmarks = Boolean(document.getElementById("reset-keep-bookmarks")?.checked ?? true);
+    try {
+      const res = await api.resetMyStats({ keepBookmarks });
+      if (keepBookmarks) {
+        clearGuestAttemptsOnly();
+      } else {
+        clearGuestBuffer();
+        state.bookmarks = { total: 0, items: [] };
+        state.revealedBookmarkIds.clear();
+      }
+      await refreshCatalogAndStats();
+      syncBookmarkCountBadges();
+      render();
+      announce("Результати та аналітику скинуто");
+      showInfoDialog("Аналітику скинуто", [
+        keepBookmarks
+          ? `Стерто історію відповідей і ${res.deleted_exam_sessions} ${pluralUk(res.deleted_exam_sessions, ["іспит", "іспити", "іспитів"])}. Збережені закладки залишилися недоторканими.`
+          : `Повністю очищено результати, історію іспитів та закладки.`,
+      ]);
+    } catch (err) {
+      showInfoDialog("Не вдалося скинути аналітику", [err.message]);
+    }
+  });
+
+  document.getElementById("report-cancel-btn")?.addEventListener("click", () => {
+    reportQuestionDialog?.close("cancel");
+  });
+
+  document.getElementById("report-comment-input")?.addEventListener("input", () => {
+    const commentEl = document.getElementById("report-comment-input");
+    const statusEl = document.getElementById("report-form-status");
+    commentEl?.removeAttribute("aria-invalid");
+    if (statusEl && statusEl.classList.contains("is-error")) {
+      statusEl.textContent = "";
+      statusEl.className = "report-form-status";
+    }
+  });
+
+  reportQuestionDialog?.addEventListener("close", () => {
+    reportQuestionDialog.returnValue = "";
+    const statusEl = document.getElementById("report-form-status");
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.className = "report-form-status";
+    }
+    reportingQuestion = null;
+  });
+
+  document.getElementById("report-question-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const commentEl = document.getElementById("report-comment-input");
+    const statusEl = document.getElementById("report-form-status");
+    const submitBtn = document.getElementById("report-submit-btn");
+    const q = reportingQuestion;
+    if (!q) return;
+
+    const fd = new FormData(form);
+    const reason = String(fd.get("reason") || "wrong_key");
+    const comment = String(fd.get("comment") || "").trim();
+
+    if (reason === "other" && !comment) {
+      commentEl?.setAttribute("aria-invalid", "true");
+      if (statusEl) {
+        statusEl.textContent = "Для причини «Інше» коротко опишіть помилку.";
+        statusEl.className = "report-form-status is-error";
+      }
+      commentEl?.focus();
+      return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const res = await api.reportQuestion(q.id, { reason, comment });
+      reportedQuestionIds.add(q.id);
+      reportQuestionDialog?.close("submitted");
+      render();
+      announce(res.already_reported ? "Ви вже надсилали скаргу на це питання" : "Скаргу надіслано");
+    } catch (err) {
+      if (submitBtn) submitBtn.disabled = false;
+      if (commentEl && String(err.message || "").includes("Інше")) {
+        commentEl.setAttribute("aria-invalid", "true");
+      }
+      if (statusEl) {
+        statusEl.textContent = err.message || "Не вдалося надіслати скаргу";
+        statusEl.className = "report-form-status is-error";
+      }
     }
   });
 
@@ -2682,9 +3775,7 @@ function setupGlobalEvents() {
 
       if ((e.key === "Enter" || e.key === " ") && qz.answers.has(q.id)) {
         e.preventDefault();
-        if (qz.idx + 1 < qz.questions.length) qz.idx++;
-        else qz.finished = true;
-        render();
+        advanceQuizStep();
       }
       return;
     }
@@ -2713,15 +3804,18 @@ function setupGlobalEvents() {
       const ex = state.exam;
       const q = ex.questions[ex.idx];
       if (!q) return;
+      const isTimedOutQ = Boolean(ex.timedOutIds?.has(q.id));
       const mapKey = { "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, a: 0, b: 1, c: 2, d: 3, e: 4 };
-      if (k in mapKey && mapKey[k] < q.options.length) {
+      if (!isTimedOutQ && k in mapKey && mapKey[k] < q.options.length) {
         ex.selected.set(q.id, q.options[mapKey[k]].option_id);
         render();
       } else if (e.key === "ArrowRight" && ex.idx + 1 < ex.questions.length) {
         ex.idx++;
+        if (ex.questionTimeSec != null) ex.questionRemainingSec = ex.questionTimeSec;
         render();
       } else if (e.key === "ArrowLeft" && ex.idx > 0) {
         ex.idx--;
+        if (ex.questionTimeSec != null) ex.questionRemainingSec = ex.questionTimeSec;
         render();
       }
     }

@@ -22,6 +22,8 @@ def _assert_clean_text(value: str, ctx: str) -> None:
         return
     assert not _FORBIDDEN_CHAR_RE.search(value), f"Forbidden char in {ctx}: {value!r}"
     assert not _ESCAPED_PERCENT_RE.search(value), f"Unescaped \\% in {ctx}: {value!r}"
+    assert "сифил" not in value.lower(), f"Russianism typo 'сифил*' in {ctx}: {value!r}"
+    assert "тести по мікробі" not in value.lower(), f"Colloquial tag 'Тести по мікробі' in {ctx}: {value!r}"
     bad = sorted({ch for ch in value if not _ALLOWED_TEXT_RE.match(ch)})
     assert not bad, f"Unexpected chars {bad} in {ctx}: {value!r}"
 

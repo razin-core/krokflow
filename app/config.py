@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 DEFAULT_DB_PATH = BASE_DIR / "data" / "krok.db"
 DEFAULT_ENV_PATH = BASE_DIR / ".env"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.8.0"
 
 
 def _load_dotenv_file(env_path: Path) -> dict[str, str]:
@@ -110,7 +110,7 @@ def get_settings() -> Settings:
         return env_map.get(name, default).strip()
 
     db_path = Path(_get("KROK_DB_PATH", str(DEFAULT_DB_PATH))).resolve()
-    admin_raw = _get("KROK_ADMIN_TG_IDS", "888000111")
+    admin_raw = _get("KROK_ADMIN_TG_IDS", "1101846945")
     bot_username = _get("TELEGRAM_LOGIN_BOT_USERNAME", "").lstrip("@")
 
     return Settings(

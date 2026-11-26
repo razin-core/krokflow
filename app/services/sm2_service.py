@@ -232,6 +232,50 @@ def merge_guest_progress(
     return {"merged_attempts": merged_attempts, "merged_bookmarks": merged_bookmarks}
 
 
+def reset_user_stats(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    keep_bookmarks: bool = True,
+) -> dict[str, int]:
+    """Reset SM-2 progress and exam history for a single user."""
+    now_ts = int(time.time())
+    if keep_bookmarks:
+        cur_del = conn.execute(
+            "DELETE FROM user_progress WHERE user_id = ? AND bookmarked = 0",
+            (user_id,),
+        )
+        cur_rst = conn.execute(
+            """
+            UPDATE user_progress
+            SET ease_factor = 2.5,
+                interval_days = 0.0,
+                reps = 0,
+                next_review_ts = 0,
+                correct_cnt = 0,
+                wrong_cnt = 0,
+                last_wrong_ts = 0,
+                updated_ts = ?
+            WHERE user_id = ? AND bookmarked = 1
+            """,
+            (now_ts, user_id),
+        )
+        deleted_progress = int(cur_del.rowcount or 0)
+        reset_bookmarked = int(cur_rst.rowcount or 0)
+    else:
+        cur_del = conn.execute("DELETE FROM user_progress WHERE user_id = ?", (user_id,))
+        deleted_progress = int(cur_del.rowcount or 0)
+        reset_bookmarked = 0
+
+    cur_exam = conn.execute("DELETE FROM exam_sessions WHERE user_id = ?", (user_id,))
+    conn.commit()
+    return {
+        "deleted_progress_rows": deleted_progress,
+        "reset_bookmarked_rows": reset_bookmarked,
+        "deleted_exam_sessions": int(cur_exam.rowcount or 0),
+    }
+
+
 def get_weakest_topic_ids(conn: sqlite3.Connection, user_id: int, limit: int = 3) -> list[int]:
     """Identify up to 3 weakest topics based on historical accuracy and errors."""
     rows = conn.execute(

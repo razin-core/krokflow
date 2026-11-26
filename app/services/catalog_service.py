@@ -16,13 +16,25 @@ from app.schemas import (
     UserOut,
 )
 
-MODULE_TITLES: dict[int, str] = {
-    1: "Модуль 1 · Загальна мікробіологія",
-    2: "Модуль 2 · Вірусологія",
-    3: "Модуль 3 · Спеціальна бактеріологія",
-    4: "Модуль 4 · ККР (додаткові)",
-    5: "Модуль 5 · Збірник тестів з мікробіології",
+SUBJECT_MODULE_TITLES: dict[str, dict[int, str]] = {
+    "microbiology": {
+        1: "Модуль 1 · Загальна мікробіологія",
+        2: "Модуль 2 · Вірусологія",
+        3: "Модуль 3 · Спеціальна бактеріологія",
+        4: "Модуль 4 · ККР (додаткові)",
+        5: "Модуль 5 · Збірник тестів з мікробіології",
+    },
+    "pharmacology": {
+        1: "Тематична база",
+        2: "Буклети КРОК (2005–2023)",
+    },
+    "pathomorphology": {
+        1: "Тематична база",
+        2: "Екзаменаційний банк",
+    },
 }
+
+MODULE_TITLES: dict[int, str] = SUBJECT_MODULE_TITLES["microbiology"]
 
 
 def get_health_stats(conn: sqlite3.Connection) -> HealthOut:
@@ -177,6 +189,7 @@ def list_subjects(conn: sqlite3.Connection, user: UserOut | None = None) -> Subj
                 )
             )
 
+        subj_mod_titles = SUBJECT_MODULE_TITLES.get(srow["slug"], {})
         modules: list[ModuleOut] = []
         for mod_no in sorted(modules_map):
             tlist = modules_map[mod_no]
@@ -188,7 +201,7 @@ def list_subjects(conn: sqlite3.Connection, user: UserOut | None = None) -> Subj
             modules.append(
                 ModuleOut(
                     module_no=mod_no,
-                    title_uk=MODULE_TITLES.get(mod_no, f"Модуль {mod_no}"),
+                    title_uk=subj_mod_titles.get(mod_no, f"Модуль {mod_no}"),
                     question_count=mq,
                     attempted_count=ma,
                     progress_pct=round((ma / mq) * 100.0, 1) if mq else 0.0,

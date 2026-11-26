@@ -44,8 +44,10 @@ export const api = {
     const q = salt ? `?salt=${encodeURIComponent(salt)}` : "";
     return requestJson(`/api/v1/questions/${questionId}/reveal${q}`);
   },
-  explainQuestion: (questionId) =>
-    requestJson(`/api/v1/questions/${questionId}/explain`, { method: "POST" }),
+  getBookmarks: (ids = []) => {
+    const qs = Array.isArray(ids) && ids.length ? `?ids=${encodeURIComponent(ids.join(","))}` : "";
+    return requestJson(`/api/v1/bookmarks${qs}`);
+  },
   startExam: (payload) =>
     requestJson("/api/v1/exam/start", { method: "POST", body: JSON.stringify(payload) }),
   submitExam: (payload) =>
@@ -53,6 +55,11 @@ export const api = {
   getMyStats: () => requestJson("/api/v1/stats/me"),
   syncGuestProgress: (payload) =>
     requestJson("/api/v1/stats/merge-guest", { method: "POST", body: JSON.stringify(payload) }),
+  resetMyStats: ({ keepBookmarks = true } = {}) =>
+    requestJson("/api/v1/stats/reset", {
+      method: "POST",
+      body: JSON.stringify({ keep_bookmarks: Boolean(keepBookmarks) }),
+    }),
   rateFlashcard: (questionId, quality) =>
     requestJson("/api/v1/flashcards/rate", {
       method: "POST",
@@ -62,5 +69,10 @@ export const api = {
     requestJson(`/api/v1/questions/${questionId}/bookmark`, {
       method: "POST",
       body: JSON.stringify({ bookmarked }),
+    }),
+  reportQuestion: (questionId, { reason, comment = "" }) =>
+    requestJson(`/api/v1/questions/${questionId}/report`, {
+      method: "POST",
+      body: JSON.stringify({ reason, comment }),
     }),
 };

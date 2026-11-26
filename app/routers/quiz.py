@@ -9,7 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.db import get_db
 from app.schemas import (
-    ExplanationOut,
+    BookmarksListResponse,
+    QuestionReportRequest,
+    QuestionReportResponse,
     QuizAnswerRequest,
     QuizAnswerResponse,
     QuizSessionRequest,
@@ -17,13 +19,14 @@ from app.schemas import (
     RevealOut,
 )
 from app.services.auth_service import OptionalUserDep
-from app.services.explain_service import get_or_generate_explanation
 from app.services.quiz_service import (
     create_quiz_session,
     grade_quiz_answer,
+    list_bookmarked_questions,
     reveal_question,
+    submit_question_report,
 )
-from app.services.rate_limit import explain_ip_limiter, extract_client_ip
+from app.services.rate_limit import extract_client_ip, report_ip_limiter
 
 router = APIRouter(tags=["quiz"])
 
@@ -68,12 +71,40 @@ def get_question_reveal(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
-@router.post("/questions/{qid}/explain", response_model=ExplanationOut)
-def explain_question(
+@router.get("/bookmarks", response_model=BookmarksListResponse)
+def get_bookmarks_list(
+    conn: Annotated[sqlite3.Connection, Depends(get_db)],
+    user: OptionalUserDep,
+    ids: Annotated[str | None, Query(max_length=1500)] = None,
+) -> BookmarksListResponse:
+    parsed_ids: list[int] | None = None
+    if ids:
+        parsed_ids = []
+        for token in ids.split(","):
+            token = token.strip()
+            if token.isdigit():
+                parsed_ids.append(int(token))
+    return list_bookmarked_questions(conn, user=user, ids=parsed_ids)
+
+
+@router.post("/questions/{qid}/report", response_model=QuestionReportResponse)
+def report_question_issue(
     qid: int,
+    payload: QuestionReportRequest,
     request: Request,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
     user: OptionalUserDep,
-) -> ExplanationOut:
-    explain_ip_limiter.check_or_raise(extract_client_ip(request))
-    return get_or_generate_explanation(conn, qid=qid, user=user)
+) -> QuestionReportResponse:
+    report_ip_limiter.check_or_raise(extract_client_ip(request))
+    try:
+        return submit_question_report(
+            conn,
+            question_id=qid,
+            reason=payload.reason,
+            comment=payload.comment,
+            user=user,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

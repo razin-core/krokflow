@@ -143,12 +143,14 @@ class RevealOut(BaseModel):
 
 
 class QuizSessionRequest(BaseModel):
-    mode: Literal["train", "hints", "flashcards", "mistakes", "smart_mix", "weak_topics"] = "train"
+    mode: Literal["train", "hints", "flashcards", "mistakes", "smart_mix", "weak_topics", "bookmarks"] = "train"
     subject_id: int | None = None
     module_no: int | None = None
     topic_id: int | None = None
     topic_ids: list[int] | None = None
+    question_ids: list[int] | None = None
     source_tag: str | None = None
+    source_tags: list[str] | None = None
     limit: int = Field(default=20, ge=1, le=150)
     hints_enabled: bool = False
 
@@ -200,10 +202,18 @@ class BookmarkResponse(BaseModel):
     bookmarked: bool
 
 
+class BookmarksListResponse(BaseModel):
+    total: int
+    items: list[QuestionOut]
+
+
 class ExamStartRequest(BaseModel):
     subject_id: int | None = None
     module_no: int | None = None
+    topic_id: int | None = None
+    topic_ids: list[int] | None = None
     source_tag: str | None = None
+    source_tags: list[str] | None = None
     question_count: int = Field(default=150, ge=5, le=150)
 
 
@@ -279,6 +289,33 @@ class GuestSyncRequest(BaseModel):
 class GuestSyncResponse(BaseModel):
     merged_attempts: int
     merged_bookmarks: int
+
+
+class ResetStatsRequest(BaseModel):
+    keep_bookmarks: bool = True
+
+
+class ResetStatsResponse(BaseModel):
+    reset: bool = True
+    deleted_progress_rows: int
+    reset_bookmarked_rows: int
+    deleted_exam_sessions: int
+
+
+ReportReason = Literal["wrong_key", "text_error", "duplicate", "other"]
+
+
+class QuestionReportRequest(BaseModel):
+    reason: ReportReason
+    comment: str = Field(default="", max_length=500)
+
+
+class QuestionReportResponse(BaseModel):
+    id: int
+    question_id: int
+    reason: ReportReason
+    status: str
+    already_reported: bool = False
 
 
 class TopicProgressStatOut(BaseModel):

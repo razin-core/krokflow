@@ -31,7 +31,10 @@ def start_exam(conn: sqlite3.Connection, req: ExamStartRequest) -> ExamStartResp
         conn,
         subject_id=req.subject_id,
         module_no=req.module_no,
+        topic_id=req.topic_id,
+        topic_ids=req.topic_ids,
         source_tag=req.source_tag,
+        source_tags=req.source_tags,
         limit=req.question_count,
     )
     # Never expose markers during an exam simulation (SDD Section 1.2).
