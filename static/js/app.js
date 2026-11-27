@@ -1,11 +1,11 @@
 /** Main KrokFlow SPA controller covering all MVP & Phase 2 screens. */
 
-import { api } from "./api.js?v=2.8.0";
+import { api } from "./api.js?v=2.8.1";
 import {
   createCascadeSelector,
   resolveCascadeScope,
   syncCascadeFromSelection,
-} from "./cascade_selector.js?v=2.8.0";
+} from "./cascade_selector.js?v=2.8.1";
 import {
   appendHighlightedText,
   clear,
@@ -13,7 +13,7 @@ import {
   el,
   pluralUk,
   setupDialogLightDismiss,
-} from "./dom.js?v=2.8.0";
+} from "./dom.js?v=2.8.1";
 import {
   clearGuestAttemptsOnly,
   clearGuestBuffer,
@@ -22,8 +22,8 @@ import {
   recordGuestAttempt,
   state,
   toggleGuestBookmark,
-} from "./state.js?v=2.8.0";
-import { initThemeToggle } from "./theme.js?v=2.8.0";
+} from "./state.js?v=2.8.1";
+import { initThemeToggle } from "./theme.js?v=2.8.1";
 
 const LETTERS = ["A", "B", "C", "D", "E"];
 const mainEl = document.getElementById("app-main");
@@ -351,6 +351,7 @@ function updateAuthHeaderPill() {
   if (!pill) return;
   clear(pill);
 
+  const appVer = state.health?.version || "2.8.1";
   if (state.auth.authenticated && state.auth.user) {
     const u = state.auth.user;
     pill.classList.add("is-auth");
@@ -362,14 +363,14 @@ function updateAuthHeaderPill() {
     const due = state.stats?.summary?.due_count || 0;
     pill.appendChild(el("span", { text: due > 0 ? `${label} · ${due}` : label }));
     if (footerText) {
-      footerText.textContent = `KrokFlow v2.0 · Профіль ${label} · SM-2 хмарна синхронізація`;
+      footerText.textContent = `KrokFlow v${appVer} · Профіль ${label} · SM-2 хмарна синхронізація`;
     }
   } else {
     pill.classList.remove("is-auth");
     pill.appendChild(el("span", { className: "guest-dot", "aria-hidden": "true" }));
     pill.appendChild(el("span", { text: "Увійти · Telegram" }));
     if (footerText) {
-      footerText.textContent = "KrokFlow v2.0 · База КРОК-1 · Гість (прогрес синхронізується після входу)";
+      footerText.textContent = `KrokFlow v${appVer} · База КРОК-1 · Гість (прогрес синхронізується після входу)`;
     }
   }
 }
@@ -1505,7 +1506,7 @@ function renderDashboard() {
     id: "search-input",
     type: "search",
     className: "search-input",
-    placeholder: "Пошук КРОК-1 за симптомом, збудником, реакцією…",
+    placeholder: "Пошук КРОК-1 за симптомом, препаратом…",
     value: state.searchQuery,
     autocomplete: "off",
     autocorrect: "off",
@@ -1591,42 +1592,6 @@ function renderDashboard() {
   ]);
   searchWrap.appendChild(searchBox);
 
-  // Compact quick-jump bar (Bookmarks + active subject filter indicator)
-  const bmkCnt = getBookmarkedCount();
-  const quickBar = el("div", { className: "chips-row" }, [
-    el(
-      "button",
-      {
-        type: "button",
-        id: "dash-bookmarks-chip",
-        className: "chip",
-        onClick: () => openBookmarks(),
-      },
-      [el("span", { text: "🔖 Закладки" }), el("span", { className: "chip-count", text: bmkCnt })]
-    ),
-  ]);
-  for (const s of state.subjects) {
-    quickBar.appendChild(
-      el(
-        "button",
-        {
-          type: "button",
-          className: `chip ${state.cascade.subjectId === s.id ? "active" : ""}`,
-          onClick: () => {
-            state.cascade.subjectId = state.cascade.subjectId === s.id ? null : s.id;
-            state.cascade.sourceKind = "all";
-            state.cascade.itemKey = "all";
-            state.cascade.itemKeys = [];
-            pushRoute(buildDashboardFilterUrl(state.cascade), { replace: true });
-            render();
-          },
-        },
-        [el("span", { text: `${s.icon} ${s.title_uk}` }), el("span", { className: "chip-count", text: s.total_questions })]
-      )
-    );
-  }
-  searchWrap.appendChild(quickBar);
-
   const resultsRegion = el("div", { id: "search-results-region", className: "stack-sm" });
   searchWrap.appendChild(resultsRegion);
   root.appendChild(searchWrap);
@@ -1634,6 +1599,7 @@ function renderDashboard() {
   // Hero Quick-Start Card
   const totalAllSubjects = state.subjects.reduce((acc, s) => acc + Number(s.total_questions || 0), 0);
   const verifiedCnt = state.health?.verified_questions ?? totalAllSubjects;
+  const bmkCnt = getBookmarkedCount();
   const hero = el("section", { className: "card hero-card" }, [
     el("div", { className: "row-between" }, [
       el("div", {}, [
@@ -1654,6 +1620,18 @@ function renderDashboard() {
         text: "ℹ️ Про базу",
         onClick: showDatabaseInfoModal,
       }),
+      !state.auth.authenticated
+        ? el(
+            "button",
+            {
+              type: "button",
+              id: "dash-bookmarks-chip",
+              className: "badge badge-btn",
+              onClick: () => openBookmarks(),
+            },
+            [el("span", { text: "🔖 Закладки ·" }), el("span", { className: "chip-count", text: bmkCnt })]
+          )
+        : null,
       el("span", { className: "badge", text: "🔀 Варіанти перемішуються щоразу" }),
     ]),
     state.auth.authenticated && state.stats?.summary
@@ -1763,7 +1741,6 @@ function renderDashboard() {
         : ["🔒 Закрити 3 слабкі теми", el("span", { className: "btn-lock-tag", text: "Telegram" })]),
     ]),
   ]);
-  root.appendChild(hero);
 
   const renderProgressPill = (obj) => {
     if (!state.auth.authenticated || (!obj.attempted_count && !obj.due_count)) return null;
@@ -1862,7 +1839,12 @@ function renderDashboard() {
         }),
       ]),
     ]);
-    root.appendChild(cascadeCard);
+    root.appendChild(
+      el("section", { className: "dashboard-primary-grid", "aria-label": "Конструктор та швидкий старт" }, [
+        cascadeCard,
+        hero,
+      ])
+    );
 
     // Compact 3-subject overview cards
     const subjGrid = el("section", { className: "subjects-overview-grid", "aria-label": "Дисципліни КРОК-1" });
@@ -1900,6 +1882,10 @@ function renderDashboard() {
       );
     }
     root.appendChild(subjGrid);
+  } else {
+    root.appendChild(
+      el("section", { className: "dashboard-primary-grid", "aria-label": "Швидкий старт" }, [hero])
+    );
   }
 
   mainEl.appendChild(root);

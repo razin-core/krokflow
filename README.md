@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/razin-core/krokflow/actions/workflows/ci.yml/badge.svg)](https://github.com/razin-core/krokflow/actions/workflows/ci.yml)
 
-Public web platform for Ukrainian medical students preparing for **KROK-1 / ЄДКІ** exams (`v2.8.0`).
+Public web platform for Ukrainian medical students preparing for **KROK-1 / ЄДКІ** exams (`v2.8.1`).
 
 - **Live:** https://krokflow.pp.ua (Guest mode + Telegram Login Widget + installable PWA manifest)
 - **Bank:** **2,570 verified questions** across 3 KROK-1 subjects — **Мікробіологія** (`729`), **Фармакологія** (`1,211`), **Патоморфологія** (`630`)

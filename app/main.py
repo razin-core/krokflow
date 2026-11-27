@@ -134,7 +134,7 @@ def create_app() -> FastAPI:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>404 · Сторінку не знайдено · KrokFlow</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=2.8.0">
+  <link rel="stylesheet" href="/static/css/app.css?v=2.8.1">
 </head>
 <body>
   <main class="container app-main" style="max-width:620px;margin-top:48px">

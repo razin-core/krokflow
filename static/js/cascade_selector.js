@@ -1,6 +1,6 @@
 /** Cascading Subject -> Source/Type -> Searchable Multi-Select Topic/Year selector component. */
 
-import { clear, el, pluralUk } from "./dom.js?v=2.8.0";
+import { clear, el, pluralUk } from "./dom.js?v=2.8.1";
 
 const BOOKLET_TAG_RE = /^Буклет\s+(\d{4})$/;
 

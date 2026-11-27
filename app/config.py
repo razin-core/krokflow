@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 DEFAULT_DB_PATH = BASE_DIR / "data" / "krok.db"
 DEFAULT_ENV_PATH = BASE_DIR / ".env"
-APP_VERSION = "2.8.0"
+APP_VERSION = "2.8.1"
 
 
 def _load_dotenv_file(env_path: Path) -> dict[str, str]:
