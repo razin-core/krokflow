@@ -18,7 +18,7 @@ from app.services.sm2_service import compute_sm2
 def _sign_telegram_payload(
     *,
     bot_token: str,
-    tg_id: int = 1101846945,
+    tg_id: int = 900000001,
     first_name: str = "Євгеній",
     username: str | None = "Razin_Sarinum",
     auth_date: int | None = None,
@@ -40,7 +40,7 @@ def _sign_telegram_payload(
 def _configure_telegram(monkeypatch, *, bot_token: str = "123456:TEST_BOT_TOKEN") -> str:
     monkeypatch.setenv("TELEGRAM_LOGIN_BOT_TOKEN", bot_token)
     monkeypatch.setenv("TELEGRAM_LOGIN_BOT_USERNAME", "krokflow_bot")
-    monkeypatch.setenv("KROK_ADMIN_TG_IDS", "1101846945")
+    monkeypatch.setenv("KROK_ADMIN_TG_IDS", "900000001")
     get_settings.cache_clear()
     return bot_token
 
@@ -83,7 +83,7 @@ def test_telegram_auth_lifecycle_and_proxy_secure_cookie(client: TestClient, mon
     assert r_bad.status_code == 401
 
     # Valid admin login over simulated Cloudflare HTTPS header -> Secure flag set
-    ok_payload = _sign_telegram_payload(bot_token=token, tg_id=1101846945)
+    ok_payload = _sign_telegram_payload(bot_token=token, tg_id=900000001)
     r_https = client.post(
         "/api/v1/auth/telegram",
         json=ok_payload,
@@ -444,3 +444,88 @@ def test_question_report_endpoint_validation_dedup_and_ratelimit(client: TestCli
         assert 429 in statuses
     finally:
         report_ip_limiter.reset()
+
+
+def test_seo_head_robots_sitemap_and_og_preview(client: TestClient) -> None:
+    r_head = client.head("/")
+    assert r_head.status_code == 200
+
+    r_robots = client.get("/robots.txt")
+    assert r_robots.status_code == 200
+    assert "Allow: /" in r_robots.text
+    assert "Disallow: /api/" in r_robots.text
+    assert "Disallow: /auth/" in r_robots.text
+    assert "Sitemap: https://krokflow.pp.ua/sitemap.xml" in r_robots.text
+
+    r_sitemap = client.get("/sitemap.xml")
+    assert r_sitemap.status_code == 200
+    assert "application/xml" in r_sitemap.headers.get("content-type", "")
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(r_sitemap.text)
+    locs = {el.text for el in root.iter() if el.tag.endswith("loc")}
+    assert "https://krokflow.pp.ua/" in locs
+    assert "https://krokflow.pp.ua/search" in locs
+    assert any(loc and "/subject/" in loc for loc in locs)
+
+    r_og = client.get("/static/icons/og-preview.png")
+    assert r_og.status_code == 200
+    assert "image/png" in r_og.headers.get("content-type", "")
+
+
+def test_report_alert_skips_without_admin_id_and_triggers_when_configured(
+    client: TestClient, monkeypatch
+) -> None:
+    from app.routers import quiz as quiz_router
+    from app.services.rate_limit import report_ip_limiter
+
+    sent_calls: list[dict[str, object]] = []
+
+    def _fake_alert(**kwargs) -> bool:
+        sent_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(quiz_router, "send_report_telegram_alert", _fake_alert)
+    report_ip_limiter.reset()
+    try:
+        search_hit = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]
+        qid = search_hit["id"]
+
+        # Without ADMIN_TELEGRAM_ID configured -> silently skipped
+        monkeypatch.delenv("ADMIN_TELEGRAM_ID", raising=False)
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        get_settings.cache_clear()
+        r1 = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "wrong_key", "comment": "Silent skip test"},
+        )
+        assert r1.status_code == 200
+        assert r1.json()["already_reported"] is False
+        assert sent_calls == []
+
+        # With TELEGRAM_BOT_TOKEN + ADMIN_TELEGRAM_ID -> triggered for new report only
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_ALERT_TOKEN")
+        monkeypatch.setenv("ADMIN_TELEGRAM_ID", "900000001")
+        get_settings.cache_clear()
+
+        r2 = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "text_error", "comment": "Alert trigger test"},
+        )
+        assert r2.status_code == 200
+        assert r2.json()["already_reported"] is False
+        assert len(sent_calls) == 1
+        assert sent_calls[0]["chat_id"] == "900000001"
+        assert sent_calls[0]["question_id"] == qid
+
+        # Duplicate report must not trigger a second alert
+        r3 = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "text_error", "comment": "Alert trigger test"},
+        )
+        assert r3.status_code == 200
+        assert r3.json()["already_reported"] is True
+        assert len(sent_calls) == 1
+    finally:
+        report_ip_limiter.reset()
+        get_settings.cache_clear()

@@ -31,7 +31,7 @@ def pregenerate_batch(
     init_db(db_path)
     settings = get_settings()
     if mode == "gemini" and not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is empty. Configure /home/ubuntu/krok_trainer/.env first.")
+        raise RuntimeError("GEMINI_API_KEY is empty. Configure .env first.")
 
     with db_session(db_path) as conn:
         clauses = ["q.status = 'verified'"]

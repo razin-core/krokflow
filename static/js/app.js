@@ -536,7 +536,7 @@ function openAuthDialog(contextHint = null) {
     bodyEl.appendChild(
       el("div", { className: "explain-box" }, [
         el("strong", { text: "Telegram Login Widget очікує токен у .env" }),
-        el("span", { text: "Адміністратору: додайте TELEGRAM_LOGIN_BOT_TOKEN та TELEGRAM_LOGIN_BOT_USERNAME у /home/ubuntu/krok_trainer/.env (після /setdomain krokflow.pp.ua у @BotFather)." }),
+        el("span", { text: "Адміністратору: додайте TELEGRAM_LOGIN_BOT_TOKEN та TELEGRAM_LOGIN_BOT_USERNAME у .env (після /setdomain krokflow.pp.ua у @BotFather)." }),
       ])
     );
   }

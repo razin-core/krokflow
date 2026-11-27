@@ -5,8 +5,9 @@ from __future__ import annotations
 import sqlite3
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
+from app.config import get_settings
 from app.db import get_db
 from app.schemas import (
     BookmarksListResponse,
@@ -26,6 +27,7 @@ from app.services.quiz_service import (
     reveal_question,
     submit_question_report,
 )
+from app.services.notify_service import send_report_telegram_alert
 from app.services.rate_limit import extract_client_ip, report_ip_limiter
 
 router = APIRouter(tags=["quiz"])
@@ -92,12 +94,13 @@ def report_question_issue(
     qid: int,
     payload: QuestionReportRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
     user: OptionalUserDep,
 ) -> QuestionReportResponse:
     report_ip_limiter.check_or_raise(extract_client_ip(request))
     try:
-        return submit_question_report(
+        result = submit_question_report(
             conn,
             question_id=qid,
             reason=payload.reason,
@@ -108,3 +111,22 @@ def report_question_issue(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if not result.already_reported:
+        settings = get_settings()
+        if settings.telegram_bot_token and settings.admin_telegram_id:
+            reporter = (
+                f"@{user.username}" if (user and user.username) else (user.first_name if user else "guest")
+            )
+            background_tasks.add_task(
+                send_report_telegram_alert,
+                bot_token=settings.telegram_bot_token,
+                chat_id=settings.admin_telegram_id,
+                report_id=result.id,
+                question_id=result.question_id,
+                reason=result.reason,
+                comment=payload.comment,
+                reporter=reporter,
+            )
+
+    return result

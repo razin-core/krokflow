@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import STATIC_DIR, get_settings
-from app.db import init_db
+from app.db import db_session, init_db
 from app.routers import auth, catalog, exam, health, quiz, stats
 
 
@@ -58,7 +58,7 @@ def create_app() -> FastAPI:
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    @app.get("/", include_in_schema=False)
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     def serve_index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
 
@@ -89,21 +89,28 @@ def create_app() -> FastAPI:
     @app.get("/robots.txt", include_in_schema=False)
     def serve_robots() -> PlainTextResponse:
         return PlainTextResponse(
-            "User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: https://krokflow.pp.ua/sitemap.xml\n"
+            "User-agent: *\n"
+            "Allow: /\n"
+            "Disallow: /api/\n"
+            "Disallow: /auth/\n"
+            "Sitemap: https://krokflow.pp.ua/sitemap.xml\n"
         )
 
     @app.get("/sitemap.xml", include_in_schema=False)
     def serve_sitemap() -> Response:
         urls = [
             "https://krokflow.pp.ua/",
-            "https://krokflow.pp.ua/module/1",
-            "https://krokflow.pp.ua/module/2",
-            "https://krokflow.pp.ua/module/3",
-            "https://krokflow.pp.ua/module/4",
-            "https://krokflow.pp.ua/module/5",
+            "https://krokflow.pp.ua/search",
             "https://krokflow.pp.ua/exam",
             "https://krokflow.pp.ua/flashcards",
         ]
+        try:
+            with db_session() as conn:
+                rows = conn.execute("SELECT id FROM subjects ORDER BY id").fetchall()
+            for row in rows:
+                urls.append(f"https://krokflow.pp.ua/subject/{int(row['id'])}")
+        except Exception:
+            pass
         entries = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
         xml = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>'
         return Response(content=xml, media_type="application/xml")

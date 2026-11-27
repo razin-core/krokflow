@@ -80,6 +80,8 @@ class Settings:
     token_secret: str
     telegram_login_bot_token: str
     telegram_login_bot_username: str
+    telegram_bot_token: str
+    admin_telegram_id: str
     admin_tg_ids: frozenset[int]
     gemini_api_key: str
     gemini_model: str
@@ -110,8 +112,10 @@ def get_settings() -> Settings:
         return env_map.get(name, default).strip()
 
     db_path = Path(_get("KROK_DB_PATH", str(DEFAULT_DB_PATH))).resolve()
-    admin_raw = _get("KROK_ADMIN_TG_IDS", "1101846945")
+    admin_raw = _get("KROK_ADMIN_TG_IDS", "")
     bot_username = _get("TELEGRAM_LOGIN_BOT_USERNAME", "").lstrip("@")
+    login_bot_token = _get("TELEGRAM_LOGIN_BOT_TOKEN", "")
+    notify_bot_token = _get("TELEGRAM_BOT_TOKEN", "") or login_bot_token
 
     return Settings(
         app_name="KrokFlow · КРОК-1 / ЄДКІ",
@@ -120,8 +124,10 @@ def get_settings() -> Settings:
         host=_get("KROK_HOST", "127.0.0.1"),
         port=int(_get("KROK_PORT", "8780")),
         token_secret=_load_or_create_secret(db_path, env_map),
-        telegram_login_bot_token=_get("TELEGRAM_LOGIN_BOT_TOKEN", ""),
+        telegram_login_bot_token=login_bot_token,
         telegram_login_bot_username=bot_username,
+        telegram_bot_token=notify_bot_token,
+        admin_telegram_id=_get("ADMIN_TELEGRAM_ID", ""),
         admin_tg_ids=_parse_admin_ids(admin_raw),
         gemini_api_key=_get("GEMINI_API_KEY", ""),
         gemini_model=_get("KROK_GEMINI_MODEL", "gemini-2.5-flash"),

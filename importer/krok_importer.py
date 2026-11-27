@@ -1383,7 +1383,7 @@ DEFAULT_INBOX_MANIFEST = [
 
 
 def import_default_inbox(
-    inbox_dir: Path = Path("/home/ubuntu/taildrop_inbox"),
+    inbox_dir: Path = Path("inbox"),
     db_path: Path | str | None = None,
 ) -> list[ImportStats]:
     """Import all 4 canonical Microbiology + KKR PDFs in deterministic order."""
@@ -1405,7 +1405,7 @@ def import_default_inbox(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="KROK Trainer positional PDF importer")
-    parser.add_argument("--inbox", type=Path, default=Path("/home/ubuntu/taildrop_inbox"))
+    parser.add_argument("--inbox", type=Path, default=Path("inbox"))
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--reset-db", action="store_true", help="Delete existing DB before importing")
     args = parser.parse_args(argv)

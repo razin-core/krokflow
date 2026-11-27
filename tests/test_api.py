@@ -171,7 +171,8 @@ def test_spa_routes_and_seo_endpoints(client: TestClient):
     r_sitemap = client.get("/sitemap.xml")
     assert r_sitemap.status_code == 200
     assert "<urlset" in r_sitemap.text
-    assert "https://krokflow.pp.ua/module/4" in r_sitemap.text
+    assert "https://krokflow.pp.ua/search" in r_sitemap.text
+    assert "https://krokflow.pp.ua/subject/1" in r_sitemap.text
 
     r_manifest = client.get("/manifest.json")
     assert r_manifest.status_code == 200
