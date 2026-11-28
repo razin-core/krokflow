@@ -188,7 +188,6 @@ def connect_db(db_path: Path | str | None = None, *, read_only: bool = False) ->
         conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     if not read_only:
-        conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA synchronous = NORMAL;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -200,6 +199,7 @@ def init_db(db_path: Path | str | None = None) -> Path:
     resolved = Path(db_path) if db_path is not None else get_settings().db_path
     conn = connect_db(resolved)
     try:
+        conn.execute("PRAGMA journal_mode = WAL;")
         conn.executescript(SCHEMA_SQL)
         conn.commit()
     finally:

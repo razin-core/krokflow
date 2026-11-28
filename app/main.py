@@ -127,14 +127,14 @@ def create_app() -> FastAPI:
     def serve_favicon() -> Response:
         return Response(status_code=204)
 
-    _NOT_FOUND_HTML = """<!DOCTYPE html>
+    _NOT_FOUND_HTML = f"""<!DOCTYPE html>
 <html lang="uk">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>404 · Сторінку не знайдено · KrokFlow</title>
-  <link rel="stylesheet" href="/static/css/app.css?v=2.8.1">
+  <link rel="stylesheet" href="/static/css/app.css?v={settings.app_version}">
 </head>
 <body>
   <main class="container app-main" style="max-width:620px;margin-top:48px">

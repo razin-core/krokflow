@@ -375,7 +375,7 @@ def create_quiz_session(
         else:
             chosen_rows = fisher_yates_shuffle(rows)[: req.limit]
 
-    questions = [build_question_out(r) for r in chosen_rows]
+    questions = [build_question_out(r, include_markers=hints_requested) for r in chosen_rows]
     return QuizSessionResponse(
         session_id=secrets.token_hex(8),
         mode=req.mode,

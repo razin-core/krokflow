@@ -27,9 +27,10 @@ def extract_client_ip(request: Request) -> str:
 class SlidingWindowLimiter:
     """Thread-safe per-key sliding-window rate limiter."""
 
-    def __init__(self, max_requests: int, window_sec: int) -> None:
+    def __init__(self, max_requests: int, window_sec: int, max_buckets: int = 1024) -> None:
         self.max_requests = max_requests
         self.window_sec = window_sec
+        self.max_buckets = max_buckets
         self._lock = threading.Lock()
         self._buckets: dict[str, deque[float]] = defaultdict(deque)
 
@@ -46,6 +47,12 @@ class SlidingWindowLimiter:
                     detail="Занадто багато запитів. Зачекайте хвилину.",
                 )
             dq.append(now)
+            if len(self._buckets) > self.max_buckets:
+                stale_keys = [
+                    k for k, bucket in self._buckets.items() if not bucket or bucket[-1] <= cutoff
+                ]
+                for k in stale_keys:
+                    self._buckets.pop(k, None)
 
     def reset(self) -> None:
         with self._lock:

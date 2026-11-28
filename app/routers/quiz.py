@@ -116,7 +116,9 @@ def report_question_issue(
         settings = get_settings()
         if settings.telegram_bot_token and settings.admin_telegram_id:
             reporter = (
-                f"@{user.username}" if (user and user.username) else (user.first_name if user else "guest")
+                f"@{user.username}"
+                if (user and user.username)
+                else (user.display_name if user else "guest")
             )
             background_tasks.add_task(
                 send_report_telegram_alert,

@@ -186,23 +186,24 @@ def merge_guest_progress(
         int(r["id"])
         for r in conn.execute("SELECT id FROM questions WHERE status = 'verified'").fetchall()
     }
+    now_ts = int(time.time())
     merged_attempts = 0
-    for item in attempts[:300]:
+    for item in sorted(attempts[:300], key=lambda x: x.ts):
         if item.question_id not in valid_ids:
             continue
+        attempt_ts = now_ts if (item.ts <= 0 or item.ts > now_ts) else item.ts
         record_question_progress(
             conn,
             user_id=user_id,
             question_id=item.question_id,
             is_correct=item.is_correct,
             quality=item.quality,
-            now_ts=item.ts,
+            now_ts=attempt_ts,
             commit=False,
         )
         merged_attempts += 1
 
     merged_bookmarks = 0
-    now_ts = int(time.time())
     for qid in set(bookmarks[:200]):
         if qid not in valid_ids:
             continue

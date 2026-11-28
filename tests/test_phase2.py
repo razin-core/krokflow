@@ -529,3 +529,132 @@ def test_report_alert_skips_without_admin_id_and_triggers_when_configured(
     finally:
         report_ip_limiter.reset()
         get_settings.cache_clear()
+
+
+def test_report_alert_user_without_username_uses_display_name(
+    client: TestClient, monkeypatch
+) -> None:
+    from app.routers import quiz as quiz_router
+    from app.services.rate_limit import report_ip_limiter
+
+    sent_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(quiz_router, "send_report_telegram_alert", lambda **kw: sent_calls.append(kw) or True)
+    report_ip_limiter.reset()
+    try:
+        token = _configure_telegram(monkeypatch)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_ALERT_TOKEN")
+        monkeypatch.setenv("ADMIN_TELEGRAM_ID", "900000002")
+        get_settings.cache_clear()
+
+        r_login = client.post(
+            "/api/v1/auth/telegram",
+            json=_sign_telegram_payload(bot_token=token, tg_id=666333, first_name="Student", username=None),
+        )
+        assert r_login.status_code == 200
+        assert r_login.json()["user"]["username"] == ""
+
+        qid = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]["id"]
+        r_rep = client.post(
+            f"/api/v1/questions/{qid}/report",
+            json={"reason": "wrong_key", "comment": "No username crash check"},
+        )
+        assert r_rep.status_code == 200
+        assert len(sent_calls) == 1
+        assert sent_calls[0]["reporter"] == "Student"
+    finally:
+        report_ip_limiter.reset()
+        get_settings.cache_clear()
+
+
+def test_quiz_session_hides_markers_without_hints_enabled(
+    client: TestClient, test_db_path, monkeypatch
+) -> None:
+    from app.db import db_session
+    from app.services.explain_service import save_explanation
+
+    search = client.get("/api/v1/search?q=темнопольн").json()
+    qid = search["items"][0]["id"]
+    with db_session(test_db_path) as conn:
+        save_explanation(
+            conn,
+            qid=qid,
+            markers=["темнопольній мікроскопії"],
+            anchor_uk="твердий шанкр → Treponema pallidum",
+            explanation_uk="Сифіліс виявляють темнопільною мікроскопією.",
+            distractors_uk="Інші спірохети.",
+            model_id="pregen-cache-v1",
+            commit=True,
+        )
+
+    # Guest session without hints_enabled must NOT leak pre-answer markers
+    r_guest = client.post("/api/v1/quiz/session", json={"mode": "train", "limit": 50})
+    assert r_guest.status_code == 200
+    assert all(q["markers"] == [] for q in r_guest.json()["questions"])
+
+    # Authenticated user without hints_enabled also receives empty markers
+    token = _configure_telegram(monkeypatch)
+    client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=666444, first_name="NoHint", username="no_hint"),
+    )
+    r_auth_plain = client.post("/api/v1/quiz/session", json={"mode": "train", "hints_enabled": False, "limit": 50})
+    assert r_auth_plain.status_code == 200
+    assert all(q["markers"] == [] for q in r_auth_plain.json()["questions"])
+
+
+def test_sliding_window_limiter_prunes_stale_buckets(monkeypatch) -> None:
+    from app.services import rate_limit as rl_mod
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(rl_mod.time, "monotonic", lambda: clock["now"])
+
+    limiter = rl_mod.SlidingWindowLimiter(max_requests=5, window_sec=10, max_buckets=2)
+    limiter.check_or_raise("ip_1")
+    limiter.check_or_raise("ip_2")
+    assert len(limiter._buckets) == 2
+
+    # Advance past window_sec and trigger a 3rd key -> stale buckets ip_1 and ip_2 must be pruned
+    clock["now"] = 120.0
+    limiter.check_or_raise("ip_3")
+    assert set(limiter._buckets.keys()) == {"ip_3"}
+
+
+def test_merge_guest_progress_clamps_future_ts_and_orders_chronologically(
+    client: TestClient, test_db_path, monkeypatch
+) -> None:
+    from app.db import db_session
+    from app.schemas import GuestAttemptItem
+    from app.services.sm2_service import merge_guest_progress
+
+    token = _configure_telegram(monkeypatch)
+    r_login = client.post(
+        "/api/v1/auth/telegram",
+        json=_sign_telegram_payload(bot_token=token, tg_id=666555, first_name="ClampUser", username="clamp_u"),
+    )
+    user_id = r_login.json()["user"]["id"]
+    qid = client.get("/api/v1/search?q=Staphylococcus").json()["items"][0]["id"]
+
+    now = int(time.time())
+    # Out-of-order attempts: wrong attempt with future ts, older correct attempt
+    attempts = [
+        GuestAttemptItem(question_id=qid, is_correct=False, quality=1, ts=now + 10_000_000),
+        GuestAttemptItem(question_id=qid, is_correct=True, quality=4, ts=now - 3600),
+    ]
+    with db_session(test_db_path) as conn:
+        res = merge_guest_progress(conn, user_id=user_id, attempts=attempts, bookmarks=[])
+        conn.commit()
+        row = conn.execute(
+            "SELECT updated_ts, next_review_ts, reps, correct_cnt, wrong_cnt, last_wrong_ts "
+            "FROM user_progress WHERE user_id = ? AND question_id = ?",
+            (user_id, qid),
+        ).fetchone()
+
+    assert res["merged_attempts"] == 2
+    assert row is not None
+    # Chronological order: correct (now-3600) ran first, then wrong (clamped to ~now) reset reps to 0
+    assert row["correct_cnt"] == 1
+    assert row["wrong_cnt"] == 1
+    assert row["reps"] == 0
+    assert row["updated_ts"] <= now + 5
+    assert row["last_wrong_ts"] <= now + 5
+    assert row["next_review_ts"] <= now + 86400 + 60
